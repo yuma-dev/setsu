@@ -46,6 +46,7 @@ import {
 } from "./api";
 import { fetchMe, type Me } from "./me";
 import { setFeedOpenHandler, type FeedListSync } from "./feedPlayerBus";
+import FeedVolume from "./FeedVolume";
 import SpeedDrum from "../player/SpeedDrum";
 import { installChromeVisibility } from "../player/chromeVisibility";
 import Waveform from "../player/Waveform";
@@ -140,7 +141,8 @@ export default function FeedPlayer() {
   const [muted, setMuted] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [fullscreen, setFullscreen] = useState(false);
-  const [volumeExpanded, setVolumeExpanded] = useState(false);
+  // bumped by the volume keys, FeedVolume flashes its row on each bump
+  const [volumeFlash, setVolumeFlash] = useState(0);
   // width / height of the loaded video; the frame takes this shape inside the stage
   const [aspect, setAspect] = useState(16 / 9);
   // click-to-toggle glyph; the counter restarts the animation, playing picks the glyph
@@ -332,6 +334,11 @@ export default function FeedPlayer() {
 
   const toggleFullscreen = useCallback(() => setFullscreen((f) => !f), []);
 
+  const setVolumeLevel = useCallback((v: number) => {
+    setVolume(v);
+    setMuted(v === 0);
+  }, []);
+
   // same show/hide rules as the library player, fed this player's own elements
   useEffect(() => {
     const overlay = overlayRef.current;
@@ -433,10 +440,12 @@ export default function FeedPlayer() {
         case "ArrowUp":
           e.preventDefault();
           changeVolume(0.1);
+          setVolumeFlash((n) => n + 1);
           break;
         case "ArrowDown":
           e.preventDefault();
           changeVolume(-0.1);
+          setVolumeFlash((n) => n + 1);
           break;
         case "m":
         case "M":
@@ -887,40 +896,16 @@ export default function FeedPlayer() {
 
                 {/* bottom pill: volume, time, timeline, duration, speed, fullscreen */}
                 <div id="bottom-controls" className="pl-pill pl-bar">
-                  <div
-                    id="volume-container"
-                    onMouseEnter={() => setVolumeExpanded(true)}
-                    onMouseLeave={() => setVolumeExpanded(false)}
+                  <FeedVolume
+                    volume={volume}
+                    muted={muted}
+                    onVolume={setVolumeLevel}
+                    onNudge={changeVolume}
+                    onToggleMute={toggleMute}
+                    flash={volumeFlash}
                   >
-                    <button
-                      id="volume-button"
-                      type="button"
-                      aria-label="Mute"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleMute();
-                      }}
-                      onWheel={(e) => changeVolume(e.deltaY < 0 ? 0.05 : -0.05)}
-                    >
-                      <VolumeGlyph volume={volume} muted={muted} />
-                    </button>
-                    <input
-                      type="range"
-                      id="volume-slider"
-                      min="0"
-                      max="1"
-                      step="0.05"
-                      value={muted ? 0 : volume}
-                      className={volumeExpanded ? undefined : "collapsed"}
-                      onClick={(e) => e.stopPropagation()}
-                      onChange={(e) => {
-                        const val = Number(e.target.value);
-                        setVolume(val);
-                        if (val > 0) setMuted(false);
-                        else setMuted(true);
-                      }}
-                    />
-                  </div>
+                    <VolumeGlyph volume={volume} muted={muted} />
+                  </FeedVolume>
                   <div id="current-time">{fmtTime(current)}</div>
                   {/* the band when the server has an envelope, else a baseline with the played part brighter */}
                   <div
