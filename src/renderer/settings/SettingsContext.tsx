@@ -45,6 +45,8 @@ export interface AppSettings {
   iconGreyscale: boolean;
   showNewClipsIndicators: boolean;
   previewVolume: number;
+  /** how the sound follows the clip's own speed; speed layers carry their own. main reads it for exports */
+  speedPitch: "tape" | "keep";
   ambientGlow: AmbientGlowSettings;
   cardGlow: CardGlowSettings;
   loudness: LoudnessSettings;
@@ -81,6 +83,7 @@ export const SETTINGS_DEFAULTS: AppSettings = {
   analysisIntroSeen: false,
   setsuIntroSeen: false,
   previewVolume: 0.1,
+  speedPitch: "tape",
   ambientGlow: { ...AMBIENT_GLOW_DEFAULTS },
   cardGlow: { ...CARD_GLOW_DEFAULTS },
   loudness: { ...LOUDNESS_DEFAULTS },

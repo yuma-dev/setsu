@@ -86,6 +86,7 @@ export function installSoundLayers(): () => void {
       v.gain.gain.setTargetAtTime(envelope(l, at, len), c.currentTime, 0.015);
       const r = Math.min(16, Math.max(0.0625, rate));
       if (Math.abs(v.el.playbackRate - r) > 1e-6) v.el.playbackRate = r;
+      if (v.el.preservesPitch !== video.preservesPitch) v.el.preservesPitch = video.preservesPitch;
       if (v.el.paused) {
         v.el.currentTime = pos;
         void v.el.play().catch(() => undefined);

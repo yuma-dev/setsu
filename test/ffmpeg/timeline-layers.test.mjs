@@ -222,21 +222,30 @@ test('zoom, blur, speed and sound layers export', async (t) => {
   });
 
   await t.test('sounds slow down with a speed layer unless it leaves them alone', async () => {
-    const run = async (sounds, out) => {
+    const run = async (sounds, out, pitch) => {
       await makeBeep();
       await layers.saveLayers(f.name, [
-        { id: 's', kind: 'speed', start: 1, end: 4, rate: 0.5, sounds },
+        { id: 's', kind: 'speed', start: 1, end: 4, rate: 0.5, sounds, pitch },
         { id: 'b', kind: 'sound', start: 1, end: 4, file: beep, name: 'beep', level: 1, fade: 0, duration: 1 },
       ], f.settings);
       return f.keep(await api.exportVideo(f.name, 0, 5, 1, 1, path.join(f.dir, out), f.settings));
     };
-    // the one second beep starts at 1 s of output; at half speed it runs to 3 s, left alone to 2 s
-    const slowed = await run(true, 'snd-slowed.mp4');
-    const normal = await run(false, 'snd-normal.mp4');
+    // the one second beep starts at 1 s of output; at half speed it runs to 3 s, left alone to 2 s.
+    // pitch kept so the 3 kHz beep stays above the highpass
+    const slowed = await run(true, 'snd-slowed.mp4', 'keep');
+    const normal = await run(false, 'snd-normal.mp4', 'keep');
     const late = { slowed: await peak(slowed.path, 2.3, 2.8, highs), normal: await peak(normal.path, 2.3, 2.8, highs) };
     const early = await peak(normal.path, 1.2, 1.8, highs);
     assert.ok(late.slowed > -20, `slowed beep still playing at 2.5 s, ${late.slowed} dB`);
     assert.ok(early - late.normal > 15, `normal beep over by 2.5 s, ${late.normal} dB vs ${early} dB`);
+
+    // tape, the default, plays it at half the rate: an octave down at 1.5 kHz, under the highpass
+    const tape = await run(true, 'snd-tape.mp4');
+    const lows = 'lowpass=f=2000:poles=2,lowpass=f=2000:poles=2';
+    const tapeLow = await peak(tape.path, 2.3, 2.8, lows);
+    const tapeHigh = await peak(tape.path, 2.3, 2.8, highs);
+    assert.ok(tapeLow > -20, `tape beep still playing at 2.5 s, ${tapeLow} dB`);
+    assert.ok(tapeLow - tapeHigh > 10, `tape beep an octave down, ${tapeLow} dB low vs ${tapeHigh} dB high`);
   });
 
   await t.test('undo keeps media alive, paste copies it from another clip', async () => {

@@ -266,6 +266,19 @@ export function rateAt(layers: Layer[], t: number): number {
   return r;
 }
 
+/** how the clip's sound is retimed at t: keep when a speed layer there holds the pitch, tape under
+ * any other, null outside them where the clip speed's setting applies. pitchOver in
+ * main/layer-export.js */
+export function pitchAt(layers: Layer[], t: number): "tape" | "keep" | null {
+  let out: "tape" | "keep" | null = null;
+  for (const l of layers) {
+    if (l.kind !== "speed" || t < l.start || t >= l.end) continue;
+    if ((l as SpeedLayer).pitch === "keep") return "keep";
+    out = "tape";
+  }
+  return out;
+}
+
 /** real seconds of playback between source times a and b at base speed; sound layers run on this
  * clock since they are not slowed with the video */
 export function playSeconds(layers: Layer[], a: number, b: number, base = 1): number {

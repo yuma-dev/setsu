@@ -399,10 +399,21 @@ function ZoomBody({ l }: { l: ZoomLayer }) {
 function SpeedBody({ l }: { l: SpeedLayer }) {
   const { items } = useLayers();
   const plays = playSeconds(items, l.start, l.end, 1);
+  const pitch = l.pitch ?? "tape";
+  const slow = l.rate < 1;
+  const sound =
+    pitch === "keep" ? "keeps its pitch" : slow ? "drops in pitch, like a slowed down record" : "rises in pitch";
   return (
     <>
       <Row label="Speed">
         <Seg<number> value={l.rate} onPick={(rate) => update(l.id, { rate })} options={SPEEDS.map((v) => [v, `${v}x`] as [number, string])} />
+      </Row>
+      <Row label="Pitch">
+        <Seg<"tape" | "keep">
+          value={pitch}
+          onPick={(p) => update(l.id, { pitch: p })}
+          options={[["tape", slow ? "Drops with it" : "Rises with it"], ["keep", "Stays the same"]]}
+        />
       </Row>
       <Row label="Sound layers">
         <Seg<boolean>
@@ -412,7 +423,8 @@ function SpeedBody({ l }: { l: SpeedLayer }) {
         />
       </Row>
       <p className="pl-lp-hint">
-        {fmtTime(l.end - l.start)} of the clip plays in {fmtTime(plays)}. The clip's own sound slows down and speeds up with it.
+        {fmtTime(l.end - l.start)} of the clip plays in {fmtTime(plays)}. The clip's own sound {slow ? "slows down" : "speeds up"} with
+        it and {sound}.
       </p>
       <PreviewButton l={l} />
     </>

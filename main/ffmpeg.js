@@ -14,7 +14,7 @@ const {
   buildOverlayGraph,
   buildFxGraph,
   buildTimeMap,
-  atempoChain,
+  speedAudio,
   retimeAudio,
   planSounds,
   mixSounds
@@ -836,8 +836,8 @@ function ffprobeAsync(filePath) {
 }
 
 // export helpers
-/** mixes per-track volumes then layers master volume, all-track volume layers and speed atempo
- * on top; null if no mix requested. output is always labeled [aout] for -map [aout]. an empty mix
+/** mixes per-track volumes then layers master volume, all-track volume layers and the speed
+ * retime on top; null if no mix requested. output is always labeled [aout] for -map [aout]. an empty mix
  * with sounds (no audio stream, or every track muted) puts the sounds on outDur of silence */
 function buildAudioMixFilterComplex({
   audioMix,
@@ -892,7 +892,7 @@ function buildAudioMixFilterComplex({
   if (hasBaseVolumeChange) postFilters.push(`volume=${effectiveVolume}`);
   postFilters.push(...volumeLayerFilters(layers, start, duration, (t) => t === 'all'));
   const retime = Boolean(tmap && tmap.segmented);
-  if (hasSpeedChange && !retime) postFilters.push(...atempoChain(effectiveSpeed));
+  if (hasSpeedChange && !retime) postFilters.push(...speedAudio(effectiveSpeed, tmap?.clipPitch));
 
   // speed layers and sounds need labelled steps after the mix
   if (retime || sounds.length > 0) {
@@ -948,10 +948,16 @@ async function exportVideoWithFallback(options) {
     emitGlobalProgress = true
   } = options;
   const duration = Math.max(0.01, Number(end) - Number(start));
-  // setpts and atempo squeeze or stretch the trim, the file runs duration / speed, speed layers
-  // included. -t, the frame count and the size-goal bitrate all go by that, or 2x keeps going
+  // setpts and the audio retime squeeze or stretch the trim, the file runs duration / speed, speed
+  // layers included. -t, the frame count and the size-goal bitrate all go by that, or 2x keeps going
   // past the trim end
-  const timeMap = buildTimeMap(layers, Number(start) || 0, duration, Number(speed) > 0 ? Number(speed) : 1);
+  const timeMap = buildTimeMap(
+    layers,
+    Number(start) || 0,
+    duration,
+    Number(speed) > 0 ? Number(speed) : 1,
+    exportSettings?.speedPitch
+  );
   const outputDuration = timeMap.outDur;
   const resolvedTuning = resolveExportTuning(exportSettings, quality, outputDuration);
   const effectiveQuality = resolvedTuning.quality;
@@ -1096,7 +1102,7 @@ async function exportVideoWithFallback(options) {
         }
         filters.push(...volumeLayerFilters(layers, exportStart, duration, (t) => t === 'all' || (audioStreamCount <= 1 && t === 0)));
         if (hasSpeedChange) {
-          filters.push(`atempo=${effectiveSpeed}`);
+          filters.push(...speedAudio(effectiveSpeed, timeMap.clipPitch));
         }
         return filters;
       };
@@ -1920,7 +1926,7 @@ async function exportAudio(clipName, start, end, volume, speed, savePath, getSet
   let audioMix = extraOptions && Array.isArray(extraOptions.audioMix) ? extraOptions.audioMix : null;
   const layers = await loadExportLayers(clipName, getSettings);
   const exportStart = Number(start) || 0;
-  const timeMap = buildTimeMap(layers, exportStart, duration, effectiveSpeed);
+  const timeMap = buildTimeMap(layers, exportStart, duration, effectiveSpeed, settings.speedPitch);
   const sounds = planSounds(layers, exportStart, duration, timeMap);
   const audioMixSilent = Array.isArray(audioMix) && audioMix.length === 0 && sounds.length === 0;
   // speed layers and sounds need the graph; a single-track clip gets a mix of its one stream
@@ -1956,7 +1962,7 @@ async function exportAudio(clipName, start, end, volume, speed, savePath, getSet
     await new Promise((resolve, reject) => {
       const command = ffmpeg(inputPath)
         .seekInput(start)
-        // atempo changes the length, -t is output time
+        // the speed retime changes the length, -t is output time
         .setDuration(audioFilterComplex ? timeMap.outDur : duration / effectiveSpeed)
         .output(outputPath);
       if (audioFilterComplex) for (const sound of sounds) command.input(sound.path);
@@ -1981,7 +1987,7 @@ async function exportAudio(clipName, start, end, volume, speed, savePath, getSet
         }
         audioFilters.push(...volumeLayerFilters(layers, exportStart, duration, (t) => t === 'all' || t === 0));
         if (hasSpeedChange) {
-          audioFilters.push(`atempo=${effectiveSpeed}`);
+          audioFilters.push(...speedAudio(effectiveSpeed, timeMap.clipPitch));
         }
         if (audioFilters.length > 0) {
           command.audioFilters(audioFilters);

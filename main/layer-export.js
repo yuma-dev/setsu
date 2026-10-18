@@ -5,7 +5,7 @@
  * takes along get its scale and offset per frame, mapped back to source time.
  *
  *   [0:v] blur boxes, zoom (source time)  setpts retime  scale  overlays (output time)
- *   [0:a] track volumes + volume layers (source time)  atrim/atempo per piece  + sounds */
+ *   [0:a] track volumes + volume layers (source time)  atrim/speedAudio per piece  + sounds */
 const fs = require('fs').promises;
 const logger = require('../utils/logger');
 
@@ -44,10 +44,16 @@ async function loadExportLayers(clipName, getSettings) {
 // expressions take offsets relative to the export start, which can be negative
 const fx = (n) => `(${Number(n).toFixed(4)})`;
 
+/** 'keep' or 'tape' for the audio under some speed layers; one set to keep pitch wins, no layer
+ * leaves it to the clip speed's own mode. pitchAt in the player's model.ts */
+const pitchOver = (covering, clipPitch) =>
+  covering.length ? (covering.some((l) => l.pitch === 'keep') ? 'keep' : 'tape') : clipPitch === 'keep' ? 'keep' : 'tape';
+
 /** source seconds (relative to the export start) to output seconds, with the clip's speed and its
  * speed layers. speed layers multiply where they overlap, same as rateAt in the player's model.ts.
- * outside the export the edge rates carry on, so layers hanging over an edge still map */
-function buildTimeMap(layers, start, duration, speed) {
+ * outside the export the edge rates carry on, so layers hanging over an edge still map. each piece
+ * also says how its audio is retimed; clipPitch is settings.speedPitch, for the clip's own speed */
+function buildTimeMap(layers, start, duration, speed, clipPitch) {
   const sp = Number(speed) > 0 ? Number(speed) : 1;
   const segs = (layers || []).filter(
     (l) => l.kind === 'speed' && l.end - start > 0 && l.start - start < duration && Math.abs(l.rate - 1) > 0.001
@@ -57,18 +63,20 @@ function buildTimeMap(layers, start, duration, speed) {
     for (const x of [l.start - start, l.end - start]) if (x > 0 && x < duration) cuts.add(x);
   }
   const xs = [...cuts].sort((a, b) => a - b);
-  const factorAt = (x) => segs.reduce((r, l) => (x >= l.start - start && x < l.end - start ? r * l.rate : r), 1);
+  const coveringAt = (x) => segs.filter((l) => x >= l.start - start && x < l.end - start);
   const pieces = [];
   for (let i = 0; i < xs.length - 1; i++) {
     const a = xs[i];
     const b = xs[i + 1];
     if (b - a < 0.0001) continue;
-    const rate = sp * factorAt((a + b) / 2);
+    const covering = coveringAt((a + b) / 2);
+    const rate = covering.reduce((r, l) => r * l.rate, sp);
+    const pitch = pitchOver(covering, clipPitch);
     const last = pieces[pieces.length - 1];
-    if (last && Math.abs(last.rate - rate) < 1e-6) last.b = b;
-    else pieces.push({ a, b, rate, c: 0 });
+    if (last && Math.abs(last.rate - rate) < 1e-6 && last.pitch === pitch) last.b = b;
+    else pieces.push({ a, b, rate, pitch, c: 0 });
   }
-  if (!pieces.length) pieces.push({ a: 0, b: duration, rate: sp, c: 0 });
+  if (!pieces.length) pieces.push({ a: 0, b: duration, rate: sp, pitch: pitchOver([], clipPitch), c: 0 });
   let acc = 0;
   for (const p of pieces) {
     p.c = acc;
@@ -98,19 +106,28 @@ function buildTimeMap(layers, start, duration, speed) {
     }
     return `(${e})`;
   };
-  return { segmented: segs.length > 0, pieces, outDur, out, rateAt, speed: sp, srcExpr, setpts: `setpts='(${expr})/TB'` };
+  return {
+    segmented: segs.length > 0,
+    pieces,
+    outDur,
+    out,
+    rateAt,
+    speed: sp,
+    clipPitch: pitchOver([], clipPitch),
+    srcExpr,
+    setpts: `setpts='(${expr})/TB'`,
+  };
 }
 
-/** atempo per instance only goes down to 0.5, slower rates chain it */
-function atempoChain(rate) {
-  const out = [];
-  let r = rate;
-  while (r < 0.5 - 1e-9) {
-    out.push('atempo=0.5');
-    r /= 0.5;
-  }
-  if (Math.abs(r - 1) > 0.001) out.push(`atempo=${r.toFixed(6)}`);
-  return out;
+/** audio filters that play a chain at rate. tape reads the samples faster or slower so the pitch
+ * follows, like a record, and since nothing is cut up it never stutters (atempo repeated grains
+ * below 0.5x). keep holds the pitch with rubberband. asetrate wants a whole rate: the first
+ * aresample pins 48 kHz so 48000 * rate is one for every preset, and every piece leaves at 48 kHz
+ * for the concat behind it */
+function speedAudio(rate, pitch) {
+  if (Math.abs(rate - 1) <= 0.001) return ['aresample=48000'];
+  if (pitch === 'keep') return ['aresample=48000', `rubberband=tempo=${rate.toFixed(6)}:pitchq=quality`];
+  return ['aresample=48000', `asetrate=${Math.round(48000 * rate)}`, 'aresample=48000:resampler=soxr:precision=28'];
 }
 
 /** [inLabel] retimed by the speed pieces into [aret]; each piece is cut out and stretched on its own */
@@ -118,13 +135,12 @@ function retimeAudio(inLabel, tmap) {
   const parts = [];
   const { pieces } = tmap;
   if (pieces.length === 1) {
-    const chain = atempoChain(pieces[0].rate);
-    parts.push(`[${inLabel}]${chain.length ? chain.join(',') : 'anull'}[aret]`);
+    parts.push(`[${inLabel}]${speedAudio(pieces[0].rate, pieces[0].pitch).join(',')}[aret]`);
     return { parts, out: 'aret' };
   }
   parts.push(`[${inLabel}]asplit=${pieces.length}${pieces.map((_, i) => `[ra${i}]`).join('')}`);
   pieces.forEach((p, i) => {
-    const f = [`atrim=start=${p.a.toFixed(4)}:end=${p.b.toFixed(4)}`, 'asetpts=PTS-STARTPTS', ...atempoChain(p.rate)];
+    const f = [`atrim=start=${p.a.toFixed(4)}:end=${p.b.toFixed(4)}`, 'asetpts=PTS-STARTPTS', ...speedAudio(p.rate, p.pitch)];
     parts.push(`[ra${i}]${f.join(',')}[rb${i}]`);
   });
   parts.push(`${pieces.map((_, i) => `[rb${i}]`).join('')}concat=n=${pieces.length}:v=0:a=1[aret]`);
@@ -133,11 +149,13 @@ function retimeAudio(inLabel, tmap) {
 
 /** sound layers that play inside the export. at is where the sound starts in output seconds, len
  * how long it plays there. segs cut the file where the speed changes: off and len in file seconds,
- * tempo what that piece plays at. speed layers set to leave sounds alone keep the file on the real
- * clock, the rest and the clip's speed stretch it like the clip audio. mirrors soundAt in model.ts */
+ * tempo what that piece plays at, pitch how. speed layers set to leave sounds alone keep the file
+ * on the real clock, the rest and the clip's speed stretch it like the clip audio. mirrors soundAt
+ * in model.ts */
 function planSounds(layers, start, duration, tmap) {
   const sp = tmap.speed || 1;
   const speeds = (layers || []).filter((l) => l.kind === 'speed' && Math.abs(l.rate - 1) > 0.001);
+  const movingAt = (x) => speeds.filter((l) => x >= l.start - start && x < l.end - start && l.sounds !== false);
   const rateAt = (x, all) =>
     speeds.reduce((r, l) => (x >= l.start - start && x < l.end - start && (all || l.sounds !== false) ? r * l.rate : r), sp);
   const out = [];
@@ -169,7 +187,7 @@ function planSounds(layers, start, duration, tmap) {
         x1 = x0 + len * hold;
         last = true;
       }
-      if (x0 >= 0 && len > 0.001) segs.push({ off: pos, len, tempo });
+      if (x0 >= 0 && len > 0.001) segs.push({ off: pos, len, tempo, pitch: pitchOver(movingAt(mid), tmap.clipPitch) });
       pos += len;
       if (last) break;
     }
@@ -184,7 +202,7 @@ function planSounds(layers, start, duration, tmap) {
 function mixSounds(inLabel, sounds, firstInput) {
   const parts = [];
   sounds.forEach((s, k) => {
-    const cut = (g) => [`atrim=start=${g.off.toFixed(4)}:duration=${g.len.toFixed(4)}`, 'asetpts=PTS-STARTPTS', ...atempoChain(g.tempo)];
+    const cut = (g) => [`atrim=start=${g.off.toFixed(4)}:duration=${g.len.toFixed(4)}`, 'asetpts=PTS-STARTPTS', ...speedAudio(g.tempo, g.pitch)];
     if (s.segs.length === 1) {
       parts.push(`[${firstInput + k}:a]${cut(s.segs[0]).join(',')}[sc${k}]`);
     } else {
@@ -203,7 +221,7 @@ function mixSounds(inLabel, sounds, firstInput) {
   return { parts, out: 'asnd' };
 }
 
-/** volume filters for the volume layers on one audio chain, in source seconds (before atempo).
+/** volume filters for the volume layers on one audio chain, in source seconds (before the retime).
  * same envelope as the player: linear ramp of fade seconds at both ends */
 function volumeLayerFilters(layers, start, duration, matchTrack) {
   const out = [];
@@ -453,7 +471,7 @@ module.exports = {
   buildOverlayGraph,
   buildFxGraph,
   buildTimeMap,
-  atempoChain,
+  speedAudio,
   retimeAudio,
   planSounds,
   mixSounds,

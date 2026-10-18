@@ -67,7 +67,14 @@ function sanitize(raw, mediaDir) {
     const follow = Array.isArray(raw.follow) ? [...new Set(raw.follow.filter((f) => FOLLOW.has(f)))] : null;
     return { ...zoom, ...(keys.length ? { keys } : {}), ...(follow ? { follow } : {}) };
   }
-  if (raw.kind === 'speed') return { ...base, rate: num(raw.rate, 0.25, 4, 0.5), ...(raw.sounds === false ? { sounds: false } : {}) };
+  if (raw.kind === 'speed') {
+    return {
+      ...base,
+      rate: num(raw.rate, 0.25, 4, 0.5),
+      ...(raw.sounds === false ? { sounds: false } : {}),
+      ...(raw.pitch === 'keep' ? { pitch: 'keep' } : {}),
+    };
+  }
   if (raw.kind === 'blur') {
     return {
       ...base,

@@ -14,6 +14,11 @@ import {
   type CardGlowSettings,
 } from "../SettingsContext";
 
+const PITCH_OPTIONS = [
+  { value: "tape", label: "Follows speed" },
+  { value: "keep", label: "Stays the same" },
+];
+
 const FPS_OPTIONS = [
   { value: "15", label: "15 fps" },
   { value: "24", label: "24 fps" },
@@ -71,6 +76,18 @@ export default function PlayerSection({ sampleThumb }: { sampleThumb: string | n
               aria-label="Preview volume"
             />
           </div>
+        </SetRow>
+        <SetRow
+          title="Pitch at other speeds"
+          description="Slowed clips sound deeper, like a slowed down record, or keep their pitch. Speed layers pick their own"
+        >
+          <Select
+            value={settings.speedPitch ?? "tape"}
+            width={150}
+            options={PITCH_OPTIONS}
+            onChange={(v) => void set("speedPitch", v)}
+            aria-label="Pitch at other speeds"
+          />
         </SetRow>
       </SetGroup>
 

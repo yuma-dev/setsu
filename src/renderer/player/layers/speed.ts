@@ -1,10 +1,16 @@
 import { getLayers } from "./store";
-import { rateAt } from "./model";
+import { pitchAt, rateAt } from "./model";
 
 // the clip's own speed (the drum) is what playbackRate holds outside speed layers. inside one the
 // loop scales it, and everything that means the clip's speed reads baseRate() instead
 let base = 1;
 let applied = 1;
+// settings.speedPitch, for the clip's own speed; speed layers carry their own
+let clipPitch: "tape" | "keep" = "tape";
+
+export function setClipPitch(pitch: "tape" | "keep" | undefined): void {
+  clipPitch = pitch === "keep" ? "keep" : "tape";
+}
 
 const video = () => document.getElementById("video-player") as HTMLVideoElement | null;
 
@@ -42,6 +48,11 @@ export function installSpeedLayers(): () => void {
       applied = want;
       v.playbackRate = want;
     }
+    // tape has chromium resample instead of running its pitch keeping stretch, the sound the
+    // export makes. the space-hold boost is a fast forward, not an edit, so it keeps the pitch
+    const pitch = (clip ? pitchAt(items, v.currentTime) : null) ?? clipPitch;
+    const keep = pitch === "keep" || window.legacyState?.wasSpaceHoldBoostActive === true;
+    if (v.preservesPitch !== keep) v.preservesPitch = keep;
   };
   raf = requestAnimationFrame(loop);
   return () => {

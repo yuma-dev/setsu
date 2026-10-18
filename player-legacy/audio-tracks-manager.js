@@ -296,6 +296,8 @@ class AudioTracksManager {
       const a = t.audioEl;
 
       if (a.playbackRate !== videoRate) a.playbackRate = videoRate;
+      // tape or keep pitch, layers/speed.ts sets it on the video
+      if (a.preservesPitch !== videoEl.preservesPitch) a.preservesPitch = videoEl.preservesPitch;
 
       if (forceSnap || seekJustSettled) {
         this._trace(`mirror SNAP (force=${!!forceSnap} settled=${seekJustSettled}) ord=${t.ordinal} from a.t=${a.currentTime.toFixed(3)} to v.t=${videoTime.toFixed(3)}`);

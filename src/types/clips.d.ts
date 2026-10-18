@@ -208,6 +208,9 @@ export interface SpeedLayer extends LayerBase {
   rate: number;
   /** false leaves sound layers at normal speed through this part */
   sounds?: boolean;
+  /** how the sound is retimed: tape (absent) lets the pitch follow the speed like a record, keep
+   * holds it (rubberband in the export) */
+  pitch?: "tape" | "keep";
 }
 export type BlurMode = "blur" | "pixelate";
 /** hides a box of the frame, in source pixels so it follows a zoom */

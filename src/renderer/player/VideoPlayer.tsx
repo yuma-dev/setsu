@@ -47,7 +47,7 @@ import LayerStage from "./layers/LayerStage";
 import LayerTags from "./layers/LayerTags";
 import { installLayerAudio } from "./layers/audio";
 import { installLayerKeys } from "./layers/keys";
-import { installSpeedLayers } from "./layers/speed";
+import { installSpeedLayers, setClipPitch } from "./layers/speed";
 import { installZoom } from "./layers/fx";
 import { installSoundLayers } from "./layers/sound";
 import { closeClip, getLayers, loadClip, select, subscribe as subscribeLayers, useLayers } from "./layers/store";
@@ -487,6 +487,8 @@ function VideoPlayer({ clipLocation, clips, renameClip, removeClips, markClipsWa
       observer.disconnect();
     };
   }, []);
+
+  useEffect(() => setClipPitch(settings.speedPitch), [settings.speedPitch]);
 
   // chrome show/hide rules, one place for keys, mouse, open and drags
   useEffect(() => {

@@ -268,10 +268,14 @@ export default function FeedPlayer() {
     }
   }, [volume, muted, clip]);
 
+  // the library player's pitch setting, tape resamples instead of chromium's pitch keeping stretch
+  const keepPitch = settings.speedPitch === "keep";
   useEffect(() => {
     const v = videoRef.current;
-    if (v) v.playbackRate = speed;
-  }, [speed, clip]);
+    if (!v) return;
+    v.playbackRate = speed;
+    v.preservesPitch = keepPitch;
+  }, [speed, keepPitch, clip]);
 
   const index = clip ? list.findIndex((c) => c.id === clip.id) : -1;
   const hasPrev = index > 0;
@@ -823,6 +827,7 @@ export default function FeedPlayer() {
                       v.volume = volume;
                       v.muted = muted;
                       v.playbackRate = speed;
+                      v.preservesPitch = keepPitch;
                     }}
                     onCanPlay={() => setLoadingVideo(false)}
                     onWaiting={() => setLoadingVideo(true)}
