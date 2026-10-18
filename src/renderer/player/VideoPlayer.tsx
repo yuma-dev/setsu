@@ -363,9 +363,12 @@ function VideoPlayer({ clipLocation, clips, renameClip, removeClips, markClipsWa
             context: { alert_code: alertCode },
           });
         }
-        return window.alert(text);
+        // no window.alert/confirm here: on windows electron stops delivering keystrokes to inputs
+        // after a native dialog, so titles could not be renamed until a restart
+        toast.show(text, alertCode ? "error" : "success", alertCode ? 6000 : 3200);
       },
-      showCustomConfirm: (msg: unknown) => window.confirm(String(msg)),
+      showCustomConfirm: (msg: unknown) =>
+        confirm({ title: "Reset trim", message: String(msg), confirmLabel: "Reset" }),
       isBenchmarkMode: window.__benchmarkConfig?.enabled === true,
       updateDiscordPresence: (details: string, state?: string | null) =>
         updateDiscordPresence(details, state ?? null),
