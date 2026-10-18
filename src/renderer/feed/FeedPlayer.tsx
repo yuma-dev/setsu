@@ -47,6 +47,7 @@ import {
 import { fetchMe, type Me } from "./me";
 import { setFeedOpenHandler, type FeedListSync } from "./feedPlayerBus";
 import SpeedDrum from "../player/SpeedDrum";
+import { installChromeVisibility } from "../player/chromeVisibility";
 import Waveform from "../player/Waveform";
 import type { ClipWaveform } from "../../types/clips";
 import {
@@ -75,8 +76,6 @@ function fmtTime(seconds: number): string {
 
 const STREAM_URL = streamUrl;
 
-/** Idle time before the hover controls fade out while playing. */
-const CONTROLS_HIDE_MS = 2400;
 /** Overlay scrollTop past which the details sheet counts as "open". */
 const SHEET_OPEN_THRESHOLD = 48;
 
@@ -134,7 +133,6 @@ export default function FeedPlayer() {
   const [waveform, setWaveform] = useState<ClipWaveform | null>(null);
   const [me, setMe] = useState<Me | null>(null);
 
-  const [playing, setPlaying] = useState(false);
   const [loadingVideo, setLoadingVideo] = useState(true);
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -147,8 +145,6 @@ export default function FeedPlayer() {
   const [aspect, setAspect] = useState(16 / 9);
   // click-to-toggle glyph; the counter restarts the animation, playing picks the glyph
   const [flash, setFlash] = useState({ n: 0, playing: false });
-  // Hover controls, mirroring the legacy player's mousemove + idle-fade UX.
-  const [controlsVisible, setControlsVisible] = useState(true);
   // Details sheet (bottom): derived from the overlay scroll position.
   const [sheetOpen, setSheetOpen] = useState(false);
 
@@ -185,9 +181,7 @@ export default function FeedPlayer() {
   // Guards a stale detail/comment fetch from clobbering a newer clip's state.
   const openTokenRef = useRef(0);
   const draggingRef = useRef(false);
-  const hideTimerRef = useRef<number | undefined>(undefined);
-  const playingRef = useRef(false);
-  playingRef.current = playing;
+  const controlsRef = useRef<HTMLDivElement | null>(null);
 
   const isOpen = clip !== null;
 
@@ -231,11 +225,9 @@ export default function FeedPlayer() {
     setCopied(false);
 
     // Reset playback UI (video element resets via keyed remount below).
-    setPlaying(false);
     setLoadingVideo(true);
     setCurrent(0);
     setDuration(clip.duration ?? 0);
-    setControlsVisible(true);
 
     // back to the stage: a prev/next while reading comments shouldn't strand the user
     overlayRef.current?.scrollTo({ top: 0 });
@@ -307,7 +299,6 @@ export default function FeedPlayer() {
         /* ignore */
       }
     }
-    window.clearTimeout(hideTimerRef.current);
     setFullscreen(false);
     setSheetOpen(false);
     setClip(null);
@@ -341,25 +332,14 @@ export default function FeedPlayer() {
 
   const toggleFullscreen = useCallback(() => setFullscreen((f) => !f), []);
 
-  const pokeControls = useCallback(() => {
-    setControlsVisible(true);
-    window.clearTimeout(hideTimerRef.current);
-    hideTimerRef.current = window.setTimeout(() => {
-      if (playingRef.current && !draggingRef.current) setControlsVisible(false);
-    }, CONTROLS_HIDE_MS);
-  }, []);
-
-  useEffect(() => () => window.clearTimeout(hideTimerRef.current), []);
-
-  // paused: controls stay up (matches the local player's feel)
+  // same show/hide rules as the library player, fed this player's own elements
   useEffect(() => {
-    if (!playing) {
-      window.clearTimeout(hideTimerRef.current);
-      setControlsVisible(true);
-    } else {
-      pokeControls();
-    }
-  }, [playing, pokeControls]);
+    const overlay = overlayRef.current;
+    const controls = controlsRef.current;
+    if (!isOpen || !overlay || !controls) return;
+    controls.classList.add("visible");
+    return installChromeVisibility({ overlay, controls, video: () => videoRef.current, isOpen: () => true });
+  }, [isOpen]);
 
   // glow: the clip's thumbnail bled out behind the frame, the local player's two layers
   // (player.css .pl-glow-*), so the feed no longer samples video frames into a canvas every tick
@@ -804,13 +784,7 @@ export default function FeedPlayer() {
             ref={fsPlayerRef}
             className={fullscreen ? "custom-fullscreen" : undefined}
           >
-            <div
-              id="video-container"
-              onMouseMove={pokeControls}
-              onMouseLeave={() => {
-                if (playingRef.current) setControlsVisible(false);
-              }}
-            >
+            <div id="video-container">
               {processing ? (
                 <div className="fp-processing">Still processing…</div>
               ) : (
@@ -843,16 +817,10 @@ export default function FeedPlayer() {
                     }}
                     onCanPlay={() => setLoadingVideo(false)}
                     onWaiting={() => setLoadingVideo(true)}
-                    onPlaying={() => {
-                      setLoadingVideo(false);
-                      setPlaying(true);
-                    }}
-                    onPlay={() => setPlaying(true)}
-                    onPause={() => setPlaying(false)}
+                    onPlaying={() => setLoadingVideo(false)}
                     onTimeUpdate={(e) => {
                       if (!draggingRef.current) setCurrent(e.currentTarget.currentTime);
                     }}
-                    onEnded={() => setPlaying(false)}
                   />
                   {loadingVideo && (
                     <div id="loading-overlay">
@@ -869,7 +837,7 @@ export default function FeedPlayer() {
                 </>
               )}
 
-              <div id="video-controls" className={controlsVisible ? "visible" : undefined}>
+              <div id="video-controls" ref={controlsRef}>
                 {/* top: title pill left, actions pill right */}
                 <div id="top-controls">
                   <div className="pl-pill pl-title fp-title" title={clip.title}>

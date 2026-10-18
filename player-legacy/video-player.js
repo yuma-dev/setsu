@@ -906,14 +906,12 @@ function handleFullscreenChange() {
   try {
     if (document.fullscreenElement) {
       elements.fullscreenPlayer.classList.add('custom-fullscreen');
-      document.addEventListener('mousemove', handleFullscreenMouseMove);
       if (ambientGlowManager) {
         ambientGlowManager.setFullscreen(true);
       }
       logger.info('Entered fullscreen mode');
     } else {
       elements.fullscreenPlayer.classList.remove('custom-fullscreen');
-      document.removeEventListener('mousemove', handleFullscreenMouseMove);
       elements.fullscreenPlayer.style.top = '51%';
       elements.fullscreenPlayer.style.left = '50%';
       elements.fullscreenPlayer.style.transform = 'translate(-50%, -50%)';
@@ -927,18 +925,6 @@ function handleFullscreenChange() {
     resetControlsTimeout();
   } catch (error) {
     logger.error('Error handling fullscreen change:', error);
-  }
-}
-
-function handleFullscreenMouseMove(e) {
-  try {
-    if (e.clientY >= window.innerHeight - 1) {
-      hideControlsInstantly();
-    } else {
-      resetControlsTimeout();
-    }
-  } catch (error) {
-    logger.error('Error in fullscreen mouse move handler:', error);
   }
 }
 
@@ -2804,7 +2790,6 @@ module.exports = {
   // Fullscreen
   toggleFullscreen,
   handleFullscreenChange,
-  handleFullscreenMouseMove,
   handleFullscreenMouseLeave,
   isVideoInFullscreen,
 

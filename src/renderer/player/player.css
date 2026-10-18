@@ -21,8 +21,9 @@
   --frame-bottom: 42px;
 }
 
-/* chrome gone: legacy drops .visible 1.8 s after the last mouse move while playing */
-#player-container:has(#video-controls:not(.visible)) {
+/* chrome gone (chromeVisibility.ts): the cursor goes with it over the video only, never over the
+   backdrop or glow around the frame */
+#fullscreen-player:has(#video-controls:not(.visible)) #video-container {
   cursor: none;
 }
 #player-container:has(#video-controls:not(.visible)) .video-nav-button {
@@ -218,13 +219,13 @@
   pointer-events: none;
   opacity: 0;
   content-visibility: hidden;
-  transition: opacity 0.4s, content-visibility 0s 0.4s allow-discrete;
+  transition: opacity 0.3s, content-visibility 0s 0.3s allow-discrete;
 }
 #video-controls.visible {
   opacity: 1;
   content-visibility: visible;
   /* the delay above is for the way out only; this rule's transition runs on the way in */
-  transition: opacity 0.4s, content-visibility 0s allow-discrete;
+  transition: opacity 0.15s, content-visibility 0s allow-discrete;
 }
 
 .pl-pill {

@@ -489,7 +489,18 @@ function VideoPlayer({ clipLocation, clips, renameClip, removeClips, markClipsWa
   }, []);
 
   // chrome show/hide rules, one place for keys, mouse, open and drags
-  useEffect(() => installChromeVisibility(), []);
+  useEffect(() => {
+    const overlay = document.getElementById("player-overlay");
+    const controls = document.getElementById("video-controls");
+    const video = document.getElementById("video-player") as HTMLVideoElement | null;
+    if (!overlay || !controls || !video) return;
+    return installChromeVisibility({
+      overlay,
+      controls,
+      video: () => video,
+      isOpen: () => document.body.classList.contains("player-open"),
+    });
+  }, []);
 
   // layers: volume automation, speed, zoom and sounds from the playhead, and their keys ahead of
   // the player's
