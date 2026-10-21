@@ -256,6 +256,8 @@ async function getAppAssets() {
 }
 
 module.exports = {
+  // the Discord account this library's presence is connected as, from READY; null until then
+  selfUser: () => (rpcReady && rpc?.user) || null,
   getAppAssets,
   initDiscordRPC,
   updateDiscordPresence,

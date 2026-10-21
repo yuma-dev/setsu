@@ -6,6 +6,9 @@ const { app, dialog, clipboard, nativeImage, net } = require('electron');
 const clipsModule = require('./clips');
 const metadata = require('./metadata');
 const thumbnails = require('./thumbnails');
+const clipdip = require('./clipdip');
+const discord = require('./discord');
+const share = require('./share');
 const { mapLimit } = require('../utils/pool');
 
 // top games get their own colour, the rest show as "other"
@@ -19,7 +22,7 @@ const OTHER_GAME = 99;
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 // a trim that keeps the whole clip within this is no trim
 const TRIM_SLACK_S = 0.5;
-// the recorder sees the owner in every voice clip, anyone under this share is a friend
+// with no signed-in account in any call, the one in this share of voice clips is taken for the owner
 const OWNER_SHARE = 0.6;
 // below this a year has too little for the recap: the clock, the stack and the type all read as
 // noise, and three days at least make it a year of clipping, not one evening
@@ -45,6 +48,27 @@ const validDate = (v) => {
   return Number.isFinite(d.getTime()) ? d : null;
 };
 const top = (map, n) => [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0, n);
+
+// who "you" are in the voice rosters: the Discord account the recorder and the library's presence
+// are signed in as, and the Setsu account's. counting rosters can't tell you from a friend who is
+// in every call too, the tie went to whoever Discord listed first
+async function whoAmI(getSettings) {
+  const ids = new Set();
+  const names = new Set();
+  const rpcUser = discord.selfUser();
+  if (rpcUser?.id) ids.add(rpcUser.id);
+  const [rec, acct] = await Promise.all([
+    clipdip.control('status').catch(() => null),
+    // /auth/me can take its 10 s timeout when the server's away, the recap won't wait that long
+    Promise.race([share.testConnection(getSettings).catch(() => null), new Promise((r) => setTimeout(r, 3000, null))])
+  ]);
+  // the recorder only says the username, usernames are unique on Discord
+  const u = rec?.ok && rec.discord?.state === 'connected' ? rec.discord.user : null;
+  if (typeof u === 'string' && u && u !== 'unknown') names.add(u.toLowerCase());
+  const did = acct?.success ? acct.user?.discordId : null;
+  if (typeof did === 'string' && did) ids.add(did);
+  return (p) => ids.has(p.id) || names.has(String(p.username).toLowerCase());
+}
 
 async function readJson(file) {
   try {
@@ -127,6 +151,7 @@ async function getRecap(year, getSettings) {
   const metaDir = metadata.getMetadataFolder(folder);
   const now = new Date();
   const sp = spanOf(year);
+  const isMe = whoAmI(getSettings);
 
   const all = await clipsModule.getClips(getSettings);
   const inYear = all.filter((c) => inSpan(validDate(c.createdAt), sp));
@@ -191,12 +216,23 @@ async function getRecap(year, getSettings) {
   });
   clips.sort((a, b) => a.date - b.date);
 
-  // owner: the one the recorder sees in nearly every voice clip
+  // owner: the signed-in account seen most in the calls, else the one in nearly every call
+  // as long as nobody ties with them
   const voiceClips = clips.filter((c) => c.discord);
   const seen = new Map();
-  for (const c of voiceClips) for (const p of c.discord.participants) if (!p.bot) tally(seen, p.id);
-  const [ownerId, ownerCount] = top(seen, 1)[0] || [null, 0];
-  const isOwner = ownerId && ownerCount >= voiceClips.length * OWNER_SHARE;
+  const mine = new Set();
+  const me = await isMe;
+  for (const c of voiceClips) {
+    for (const p of c.discord.participants) {
+      if (p.bot) continue;
+      tally(seen, p.id);
+      if (me(p)) mine.add(p.id);
+    }
+  }
+  const ranks = top(seen, Infinity);
+  const [first, second] = ranks;
+  const ownerId = ranks.find(([id]) => mine.has(id))?.[0] ?? (first && first[1] >= voiceClips.length * OWNER_SHARE && first[1] > (second?.[1] ?? 0) ? first[0] : null);
+  const isOwner = Boolean(ownerId);
   const latestOf = (id) => {
     let p = null;
     for (const c of voiceClips) for (const q of c.discord.participants) if (q.id === id) p = q;
