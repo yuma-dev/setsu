@@ -22,7 +22,8 @@ function Overlay({ year }: { year: number }) {
     let live = true;
     window.clips
       .getRecap(year)
-      .then((d) => live && setData(d))
+      // nothing back would leave a blank overlay that only Escape closes
+      .then((d) => live && (d ? setData(d) : setFailed(true)))
       .catch(() => live && setFailed(true));
     return () => {
       live = false;

@@ -19,7 +19,6 @@ import {
   NAMES,
   SANS,
   STACK_REF,
-  TYPES,
   bgOf,
   buildModel,
   cl,
@@ -27,7 +26,6 @@ import {
   eo,
   eob,
   fmtAlt,
-  fmtHM,
   fmtLen,
   fmtN,
   fmtS,
@@ -36,6 +34,7 @@ import {
   pad,
   pct,
   pickRef,
+  plural,
   shortName,
   type Friend,
   type Lch,
@@ -45,7 +44,7 @@ import {
 } from "./model";
 import { drawISS, drawPlane, drawSil, lay, loadImage, ready, rrp, seeded } from "./draw";
 import { PackScene, type PackPhase } from "./pack";
-import type { ShareQuestion, ShareTier } from "./share";
+import { chipsOf, fmtDur, sharePayloadWithPics, statsOf, typeOf, type ShareQuestion, type ShareTier, type Stat } from "./share";
 import * as au from "./audio";
 import { MixPanel } from "./MixPanel";
 import { markRecapFinished } from "./recapStore";
@@ -74,6 +73,8 @@ interface State {
   toast: string | null;
   k: number;
   vph: "intro" | "play";
+  /** the rewatched clip's file is gone or won't play */
+  vbad: boolean;
   vp: number;
   muted: boolean;
   /** the cutting room guess, as shares of a minute */
@@ -180,6 +181,14 @@ const EASE_POP = "cubic-bezier(.34,1.56,.64,1)";
 const rise = (d: number, dur = 0.7): CSSProperties => ({ animation: `rc-rise ${dur}s ${EASE_OUT} ${d}s both` });
 const pop = (d: number, dur = 0.5): CSSProperties => ({ animation: `rc-pop ${dur}s ${EASE_POP} ${d}s both` });
 const fade = (d: number, dur: number): CSSProperties => ({ animation: `rc-fade ${dur}s ease ${d}s both` });
+/** a smaller font once the text runs past `max` characters at `px`, so a big number stays on one line */
+const fit = (t: string, px: number, max: number): CSSProperties => (t.length > max ? { fontSize: Math.floor((px * max) / t.length) } : {});
+const trunc = (t: string, n: number) => (t.length > n ? t.slice(0, n - 1).trimEnd() + "…" : t);
+/** where the kept part sits, only said when the trims agree on it */
+const cutWhere = (s: number, e: number) => {
+  const w = s < 0.15 && e > 0.85 ? "Nearly the whole thing" : e > 0.85 && s > 0.35 ? "Almost always the ending" : s < 0.15 && e < 0.65 ? "Mostly the start" : "";
+  return w ? w + ": on average from" : "On average from";
+};
 
 type Tier = "spot" | "close" | "near" | "off";
 /** how close a guess came. spot and close count as right */
@@ -248,6 +257,7 @@ export default class Recap extends Component<Props, State> {
     toast: null,
     k: 1,
     vph: "intro",
+    vbad: false,
     vp: 0,
     muted: false,
     cs: 0.2,
@@ -682,7 +692,10 @@ export default class Recap extends Component<Props, State> {
 
   chapters(): Key[] {
     const D = this.D;
-    const all: Array<Key | false> = ["stack", "clock", D.friends.length >= 2 && "orbit", "cut", (D.watch?.sessions ?? 0) >= 3 && "repeat", "chart", "card"];
+    // a chapter with nothing true to say is left out: no footage, no hours, or trims too few or
+    // too unknown to average while plenty of clips were trimmed
+    const cut = D.hasTrims || D.trimmed < Math.max(1, D.count * 0.1);
+    const all: Array<Key | false> = [D.hasFootage && "stack", D.hasHours && "clock", D.friends.length >= 2 && "orbit", cut && "cut", (D.watch?.sessions ?? 0) >= 3 && "repeat", "chart", "card"];
     return all.filter((k): k is Key => Boolean(k));
   }
 
@@ -1069,7 +1082,7 @@ export default class Recap extends Component<Props, State> {
       off: false,
       srcs: G ? G.srcs : [starUrl],
       name: G ? G.name : i === 99 ? "Other games" : "No game detected",
-      n: `${fmtN(bs.length)} clips · peaks at ${pad(ph)}:00`,
+      n: `${plural(bs.length, "clip")} · peaks at ${pad(ph)}:00`,
     };
   }
 
@@ -1148,6 +1161,8 @@ export default class Recap extends Component<Props, State> {
     this.setState({ vph: "intro", vp: 0 });
     clearTimeout(this.vt);
     this.vt = window.setTimeout(() => {
+      // nothing to play, straight to the answer after the title
+      if (this.state.vbad) return this.vidEnded();
       this.setState({ vph: "play" });
       au.play("immersive-start", { gain: 0.8 });
       // the clip's own sound takes over, the music waits underneath
@@ -1165,6 +1180,10 @@ export default class Recap extends Component<Props, State> {
       });
     }, 2300);
   }
+  vidErr = () => {
+    this.setState({ vbad: true });
+    if (this.state.vph === "play") this.vidEnded();
+  };
   vidEnded = () => {
     if (this.curKey() === "repeat" && this.state.step === 1) {
       au.play("immersive-end", { gain: 0.8 });
@@ -1356,17 +1375,7 @@ export default class Recap extends Component<Props, State> {
   }
 
   cardChips() {
-    const D = this.D;
-    const a = D.act;
-    const F = D.friends;
-    const chips: Array<{ l: string; v: string; srcs?: string[]; rad?: string }> = [];
-    if (D.hasGames && D.topGames[0]) chips.push({ l: "MAIN GAME", v: shortName(D.topGames[0].name), srcs: D.topGames[0].srcs, rad: "9px" });
-    else chips.push({ l: "ACTIVE DAYS", v: String(D.activeDays) });
-    if (F.length) chips.push({ l: "DUO", v: F[0].name, srcs: F[0].av ? [F[0].av] : undefined, rad: "50%" });
-    else chips.push({ l: "ON DISK", v: (D.bytes / 1e9).toFixed(1) + " GB" });
-    chips.push(D.streak.len > 1 ? { l: "LONGEST STREAK", v: D.streak.len + " days" } : { l: "ACTIVE DAYS", v: String(D.activeDays) });
-    chips.push(a.trim ? { l: "TRIM EDITS", v: fmtN(a.trim) } : { l: "REWATCHES", v: fmtN(a.watch_session || 0) });
-    return chips;
+    return chipsOf(this.D, this.D.friends[0] ?? null);
   }
 
   /** the chip pictures as data urls before anyone saves the card; the first source that loads wins */
@@ -1430,7 +1439,7 @@ export default class Recap extends Component<Props, State> {
     const D = this.D;
     this.setState({ sharing: true });
     try {
-      const [card, { sharePayloadWithPics }] = await Promise.all([this.cardPng(), import("./share")]);
+      const card = await this.cardPng();
       if (!card) throw new Error("");
       const guesses: Partial<Record<ShareQuestion, ShareTier>> = {};
       for (const k of Object.keys(this.state.rev) as ShareQuestion[]) {
@@ -1499,12 +1508,14 @@ export default class Recap extends Component<Props, State> {
       }
       case "who": {
         const F = D.friends;
-        const r = F.findIndex((f) => f.id === g.who);
-        if (r < 0) return null;
-        const f = F[r];
+        const i = F.findIndex((f) => f.id === g.who);
+        if (i < 0) return null;
+        const f = F[i];
+        // friends are sorted by clips, so a tie ranks where its count first shows up
+        const r = F.findIndex((x) => x.clips === f.clips);
         const acc = f.clips / F[0].clips;
         // a near tie for first is as good as first
-        return { tier: r === 0 ? "spot" : acc >= 0.85 ? "close" : acc >= 0.6 ? "near" : "off", acc, pct: false, big: `#${r + 1}`, said: `You picked ${f.name}.`, off: r === 0 ? `${f.clips} clips together.` : `Your #${r + 1}, ${f.clips} clips to ${F[0].clips}.` };
+        return { tier: r === 0 ? "spot" : acc >= 0.85 ? "close" : acc >= 0.6 ? "near" : "off", acc, pct: false, big: `#${r + 1}`, said: `You picked ${f.name}.`, off: r === 0 ? `${plural(f.clips, "clip")} together.` : `Your #${r + 1}, ${plural(f.clips, "clip")} to ${fmtN(F[0].clips)}.` };
       }
       case "cut": {
         if (!D.hasTrims) return null;
@@ -2003,8 +2014,8 @@ export default class Recap extends Component<Props, State> {
         const yb = GY + drop(RX);
         const ya = yb - alt;
         ctx.globalAlpha = aB;
-        if (B.kind === "mountain") {
-          drawSil(ctx, "mountain", RX, yb, alt);
+        if (B.kind === "mountain" || B.kind === "burj") {
+          drawSil(ctx, B.kind, RX, yb, alt);
           ctx.globalAlpha = 1;
           label(B.name, B.h, RX, ya, aB);
         } else {
@@ -2399,7 +2410,7 @@ export default class Recap extends Component<Props, State> {
           ctx.fillText("YOU", lx, ly);
         }
         ctx.globalAlpha = 1;
-        if (step === 1) center = [pad(ph) + ":00", D.byHour[ph] + " CLIPS"];
+        if (step === 1) center = [pad(ph) + ":00", plural(D.byHour[ph], "CLIP", "CLIPS")];
       }
     }
     ctx.fillStyle = "#0c0914";
@@ -2621,10 +2632,10 @@ export default class Recap extends Component<Props, State> {
         ctx.textBaseline = "top";
         ctx.font = `600 16px ${SANS}`;
         ctx.fillStyle = "#f3f1f7";
-        ctx.fillText(f.name, f.x, f.y + s + 12);
+        ctx.fillText(trunc(f.name, 20), f.x, f.y + s + 12);
         ctx.font = `400 13px ${MONO}`;
         ctx.fillStyle = "rgba(243,241,247,.55)";
-        ctx.fillText(f.clips === 1 ? "1 clip" : f.clips + " clips", f.x, f.y + s + 33);
+        ctx.fillText(plural(f.clips, "clip"), f.x, f.y + s + 33);
         ctx.textBaseline = "alphabetic";
         ctx.globalAlpha = 1;
       }
@@ -2811,7 +2822,7 @@ export default class Recap extends Component<Props, State> {
   renderIntro() {
     const D = this.D;
     const uiO = this.state.introOut ? 0 : 1;
-    const line = D.count ? `${fmtN(D.count)} clips. One year. Let's look back.` : `No clips saved in ${D.year} yet. Come back once you've clipped something.`;
+    const line = D.count ? `${plural(D.count, "clip")}. One year. Let's look back.` : `No clips saved in ${D.year} yet. Come back once you've clipped something.`;
     return (
       <div className="rc-intro" onPointerMove={this.introMove} onPointerLeave={this.introLeave}>
         <canvas ref={this.introCv} className="rc-cv" />
@@ -2863,9 +2874,9 @@ export default class Recap extends Component<Props, State> {
     const ge = g.end ?? B.h * 0.5;
     const qA = D.stackH / A.h;
     const qB = D.endH / B.h;
-    const stackLine = qA < 0.95 ? `About ${pct(qA)} of ${A.name}.` : qA < 1.05 ? `Almost exactly ${A.name}.` : `${qA.toFixed(1)}× ${A.name}.`;
+    const stackLine = qA < 0.005 ? `Less than 1% of ${A.name}.` : qA < 0.95 ? `About ${pct(qA)} of ${A.name}.` : qA < 1.05 ? `Almost exactly ${A.name}.` : `${qA.toFixed(1)}× ${A.name}.`;
     const endLine =
-      (qB > 1.05 ? `Past ${B.name} by ${fmtLen(D.endH - B.h)}.` : qB > 0.95 ? `Right at ${B.name}.` : `${pct(qB)} of the way to ${B.name}.`) +
+      (qB > 1.05 ? `Past ${B.name} by ${fmtLen(D.endH - B.h)}.` : qB > 0.95 ? `Right at ${B.name}.` : qB < 0.005 ? `Less than 1% of the way to ${B.name}.` : `${pct(qB)} of the way to ${B.name}.`) +
       (D.endH > 1e5 && B.kind !== "karman" ? " Your year left the atmosphere." : "");
     return (
       <div className="rc-ch">
@@ -2885,6 +2896,7 @@ export default class Recap extends Component<Props, State> {
                 Print every frame you saved this year. Stack the sheets.
               </h1>
               <p className="rc-p" style={rise(0.15)}>
+                {D.footageEstimated ? "About " : ""}
                 {fmtN(D.frames)} frames, one sheet each. How tall is the pile next to {A.name}?
               </p>
               <div className="rc-row" style={{ gap: 28, marginTop: 8, ...rise(0.25) }}>
@@ -2897,7 +2909,7 @@ export default class Recap extends Component<Props, State> {
           ) : null}
           {S === 1 ? (
             <div className="rc-col" style={{ gap: 22 }}>
-              <span className="rc-big" style={rise(1.1, 0.8)}>
+              <span className="rc-big" style={{ ...fit(fmtLen(D.stackH), 120, 7), ...rise(1.1, 0.8) }}>
                 {fmtLen(D.stackH)}
               </span>
               <p className="rc-p rc-p-lg" style={rise(1.2, 0.8)}>
@@ -2927,7 +2939,7 @@ export default class Recap extends Component<Props, State> {
           ) : null}
           {S === 3 ? (
             <div className="rc-col" style={{ gap: 22 }}>
-              <span className="rc-big" style={rise(1.4, 0.8)}>
+              <span className="rc-big" style={{ ...fit(fmtLen(D.endH), 120, 7), ...rise(1.4, 0.8) }}>
                 {fmtLen(D.endH)}
               </span>
               <p className="rc-p rc-p-lg" style={rise(1.5, 0.8)}>
@@ -2978,7 +2990,8 @@ export default class Recap extends Component<Props, State> {
                 {pad(D.peak)}:00 is your hour.
               </h1>
               <p className="rc-p rc-p-74" style={rise(2.3)}>
-                {D.byHour[D.peak]} clips in that hour alone. {pct(D.nightShare)} of everything happens after 20:00.
+                {plural(D.byHour[D.peak], "clip")} in that hour alone.{" "}
+                {D.nightShare < 0.005 ? "None of it" : D.nightShare > 0.995 ? "All of it" : `${pct(D.nightShare)} of everything`} happens after 20:00.
               </p>
               {this.verdictEl("hour", 2.5)}
               {D.hasGames ? (
@@ -3026,6 +3039,8 @@ export default class Recap extends Component<Props, State> {
       .filter(Boolean)
       .slice(0, 4);
     const sf = F.find((f) => f.id === (st.sel || top.id)) || top;
+    // a tie for first is everyone in it, the verdict already counts any of them as right
+    const tied = F.filter((f) => f.clips === top.clips);
     let duo: { name: string; n: number } | null = null;
     for (const k in D.pairs) {
       const [a, b] = k.split("-");
@@ -3052,7 +3067,7 @@ export default class Recap extends Component<Props, State> {
           ) : (
             <div className="rc-col" style={{ gap: 18 }}>
               <h1 className="rc-h1 rc-h1-56" style={rise(0.4)}>
-                {top.name}.
+                {tied.length > 2 ? `${tied[0].name}, ${tied[1].name} and more.` : tied.map((f) => f.name).join(" and ") + "."}
               </h1>
               {this.verdictEl("who", 0.6)}
             </div>
@@ -3088,9 +3103,11 @@ export default class Recap extends Component<Props, State> {
                 </div>
               </div>
               <div className="rc-row rc-baseline" style={{ gap: 12 }}>
-                <span className="rc-friend-n">{sf.clips}</span>
+                <span className="rc-friend-n" style={fit(fmtN(sf.clips), 64, 4)}>
+                  {fmtN(sf.clips)}
+                </span>
                 <span className="rc-friend-since">
-                  clips together
+                  {sf.clips === 1 ? "clip" : "clips"} together
                   <br />
                   since {D.cal.fmtD(sf.first)}
                 </span>
@@ -3100,13 +3117,13 @@ export default class Recap extends Component<Props, State> {
                   <div key={gm.name} className="rc-row" style={{ gap: 12 }}>
                     <div className="rc-icon" style={{ width: 30, height: 30, borderRadius: 8, backgroundImage: bgOf(gm.srcs.length ? gm.srcs : [starUrl]) }} />
                     <span className="rc-friend-game">{gm.name}</span>
-                    <span className="rc-friend-gn">{gm.n}</span>
+                    <span className="rc-friend-gn">{fmtN(gm.n)}</span>
                   </div>
                 ))}
               </div>
               {duo ? (
                 <span className="rc-friend-duo">
-                  Shows up with {duo.name} in {duo.n} of those.
+                  Shows up with {duo.name} in {fmtN(duo.n)} of those.
                 </span>
               ) : null}
               <span className="rc-hint rc-hint-sm">CLICK ANYONE IN ORBIT</span>
@@ -3126,6 +3143,8 @@ export default class Recap extends Component<Props, State> {
     const cutQ = S === 0 && D.hasTrims;
     const ks = D.hasTrims ? T.s : 0;
     const kw = D.hasTrims ? T.e - T.s : 1;
+    // a range near the start puts the label under the verdict, so it sits past the line's end or at its right edge
+    const keepLab: CSSProperties = !D.hasTrims || ks >= 0.3 ? {} : ks + kw < 0.75 ? { left: "calc(100% + 16px)" } : { left: "auto", right: 0 };
     return (
       <div className="rc-ch rc-cut">
         <div className="rc-copy" style={{ left: 120, top: 120, width: 1000, gap: 24 }}>
@@ -3156,8 +3175,10 @@ export default class Recap extends Component<Props, State> {
               </h1>
               <p className="rc-p rc-p-74" style={{ maxWidth: 760, ...rise(1) }}>
                 {D.hasTrims
-                  ? `Almost always the ending: on average from ${fmtS(T.s)} to ${fmtS(T.e)}. Taller bars are seconds that survived more often.`
-                  : `${fmtN(D.count)} clips and barely a trim. The whole minute, every time.`}
+                  ? `${cutWhere(T.s, T.e)} ${fmtS(T.s)} to ${fmtS(T.e)}. Taller bars are seconds that survived more often.`
+                  : D.trimmed
+                    ? `${plural(D.count, "clip")} and barely a trim. The whole minute, almost every time.`
+                    : `${plural(D.count, "clip")} and not a single trim. The whole minute, every time.`}
               </p>
               {this.verdictEl("cut", 1.3)}
             </div>
@@ -3183,7 +3204,7 @@ export default class Recap extends Component<Props, State> {
         </div>
         {cutA ? (
           <div className="rc-keep-line" style={{ left: 120 + 1680 * ks, width: 1680 * kw }}>
-            <span>WHAT YOU KEEP · {D.hasTrims ? `${fmtS(T.s)} → ${fmtS(T.e)}` : "EVERYTHING"}</span>
+            <span style={keepLab}>WHAT YOU KEEP · {D.hasTrims ? `${fmtS(T.s)} → ${fmtS(T.e)}` : "EVERYTHING"}</span>
           </div>
         ) : null}
         <div
@@ -3238,9 +3259,10 @@ export default class Recap extends Component<Props, State> {
           playsInline
           preload="auto"
           onEnded={this.vidEnded}
+          onError={this.vidErr}
           onTimeUpdate={this.vidTime}
           onClick={rpPlay ? this.togglePlay : undefined}
-          style={{ filter, transform: `scale(${rpPlay ? 1 : 1.08})`, cursor: rpPlay ? "pointer" : undefined }}
+          style={{ filter, transform: `scale(${rpPlay ? 1 : 1.08})`, cursor: rpPlay ? "pointer" : undefined, opacity: st.vbad && !W.poster ? 0 : undefined }}
         />
         {S === 0 ? (
           <>
@@ -3311,9 +3333,11 @@ export default class Recap extends Component<Props, State> {
                 “{W.title}”
               </span>
               {this.verdictEl("rw", 0.7)}
-              <button type="button" className="rc-btn-ghost" onClick={this.replayClip} style={{ alignSelf: "flex-start", ...rise(1.1) }}>
-                Watch again
-              </button>
+              {st.vbad ? null : (
+                <button type="button" className="rc-btn-ghost" onClick={this.replayClip} style={{ alignSelf: "flex-start", ...rise(1.1) }}>
+                  Watch again
+                </button>
+              )}
             </div>
           </>
         ) : null}
@@ -3322,37 +3346,8 @@ export default class Recap extends Component<Props, State> {
   }
 
   /** the year's other numbers, most telling first, one per star */
-  chartStats(): Array<{ v: string; l: string; n: string }> {
-    const D = this.D;
-    const a = D.act;
-    const out: Array<{ v: string; l: string; n: string }> = [];
-    const add = (l: string, v: string | number | false | null | undefined, n = "") => {
-      if (v) out.push({ l, v: String(v), n });
-    };
-    add("CLIPS SAVED", fmtN(D.count), `${(D.bytes / 1e9).toFixed(1)} GB on disk`);
-    add("OF FOOTAGE", fmtHM(D.seconds), `${D.activeDays} days with a clip`);
-    if (D.streak.len > 1) add("DAY STREAK", D.streak.len, `${D.cal.fmtD(D.streak.a)} to ${D.cal.fmtD(D.streak.b)}`);
-    if (a.watch_session) add("REWATCHES", fmtN(a.watch_session), `${fmtHM(D.watchSec)} of watching`);
-    if (D.exportsTotal) {
-      const ex = D.exports;
-      const parts: string[] = [];
-      if (D.clipN) parts.push(`${D.clipN} copied`);
-      if (ex.share_upload) parts.push(`${ex.share_upload} links`);
-      if (ex.file) parts.push(`${ex.file} files`);
-      add("EXPORTS", fmtN(D.exportsTotal), parts.join(" · "));
-    }
-    if (a.rename) add("RENAMES", fmtN(a.rename), D.named ? `${D.named} clips have a real name` : "");
-    if (a.trim) add("TRIMS", fmtN(a.trim), `across ${D.trimmed} clips`);
-    if (a.favorite_add) add("FAVOURITES", fmtN(a.favorite_add));
-    const spd = Object.entries(D.speeds)
-      .filter(([k]) => k !== "1")
-      .sort((x, y) => y[1] - x[1]);
-    if (a.speed_change) add("SPEED CHANGES", fmtN(a.speed_change), spd.length ? `mostly ${spd[0][0]}×` : "");
-    if (a.delete) add("DELETED", fmtN(a.delete));
-    if (a.volume_change) add("VOLUME TWEAKS", fmtN(a.volume_change));
-    if (D.latest) add("LATEST CLIP", D.latest.t, D.latest.date);
-    if (D.longestTitle && D.longestTitle.length > 40) add("LONGEST TITLE", D.longestTitle.length + " chars");
-    return out.slice(0, CHART.length);
+  chartStats(): Stat[] {
+    return statsOf(this.D).slice(0, CHART.length);
   }
 
   renderChart() {
@@ -3368,7 +3363,7 @@ export default class Recap extends Component<Props, State> {
             Everything else you did, charted.
           </h1>
           <p className="rc-p" style={rise(0.15)}>
-            Jan 1 to {D.through}. Every star is something you did in Setsu. Hover one.
+            {D.through ? `Jan 1 to ${D.through}. ` : ""}Every star is something you did in Setsu. Hover one.
           </p>
         </div>
         <svg className="rc-chart-lines" viewBox="0 0 1920 1080" aria-hidden>
@@ -3416,7 +3411,7 @@ export default class Recap extends Component<Props, State> {
     const D = this.D;
     const st = this.state;
     const ph = st.cardPh;
-    const tp = TYPES[D.code] || ["Star Clipper", ""];
+    const tp = typeOf(D);
     const asked = Object.keys(st.rev) as Array<keyof State["rev"]>;
     const score = asked.filter((k) => this.correct(k)).length;
     const chips = this.cardChips();
@@ -3461,10 +3456,12 @@ export default class Recap extends Component<Props, State> {
                         <span>No. {String(D.count).padStart(4, "0")}</span>
                       </div>
                       <div className="rc-row rc-front-count">
-                        <span className="rc-front-n">{fmtN(D.count)}</span>
+                        <span className="rc-front-n" style={fit(fmtN(D.count), 120, 3)}>
+                          {fmtN(D.count)}
+                        </span>
                         <div className="rc-col" style={{ gap: 8, paddingBottom: 4 }}>
-                          <span className="rc-front-saved">clips saved</span>
-                          <span className="rc-front-footage">{fmtHM(D.seconds)} of footage</span>
+                          <span className="rc-front-saved">{D.count === 1 ? "clip saved" : "clips saved"}</span>
+                          {D.seconds > 0 ? <span className="rc-front-footage">{fmtDur(D.seconds)} of footage</span> : null}
                         </div>
                       </div>
                       <div className="rc-art">
@@ -3496,7 +3493,7 @@ export default class Recap extends Component<Props, State> {
                           {D.owner.handle ? <span className="rc-front-handle">@{D.owner.handle}</span> : null}
                         </div>
                         <div className="rc-row" style={{ gap: 12 }}>
-                          <span className="rc-front-score">{asked.length ? `GUESSED ${score}/${asked.length}` : `${D.activeDays} DAYS`}</span>
+                          <span className="rc-front-score">{asked.length ? `GUESSED ${score}/${asked.length}` : D.activeDays ? plural(D.activeDays, "DAY", "DAYS") : ""}</span>
                           <img src={starUrl} alt="" style={{ width: 20, height: 20 }} />
                         </div>
                       </div>

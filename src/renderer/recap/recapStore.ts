@@ -1,6 +1,7 @@
-// the year recap is hidden until it ships. in the devtools console __recap() shows its rail
-// button and remembers that across launches, __recap(false) hides it again, __recap(2025) points
-// it at another year for this session. __recapMix() toggles the sound mixer over the recap,
+// the year recap is hidden until it ships. in the devtools console __recap() turns its rail
+// button on and remembers that across launches, __recap(false) turns it off, __recap(2025) points
+// it at another year for this session. even on, the button only shows once main says the year
+// has enough to recap (recapEligible: 10 clips on 3 days); __recap("force") shows it regardless. __recapMix() toggles the sound mixer over the recap,
 // __recapShare() saves the shared page's payload (below). once a year's recap has been seen through,
 // its rail button flies into the settings button and from then on only shows in the settings rail;
 // __recapFly() plays that now as if the recap was just finished, __recapUndock() puts it back.
@@ -8,6 +9,7 @@
 import { useSyncExternalStore } from "react";
 
 const KEY = "clip-library:recap-pill";
+const FORCE_KEY = "clip-library:recap-force";
 
 interface RecapState {
   enabled: boolean;
@@ -20,13 +22,26 @@ interface RecapState {
   docked: boolean;
   /** bumped by __recapFly() to fly right away, without waiting for the pointer */
   flyNow: number;
+  /** the year has enough for a recap; null until main has answered */
+  eligible: boolean | null;
+  /** the year that answer is for */
+  eligibleYear: number | null;
+  /** __recap("force"): the button shows whether the year has enough or not */
+  force: boolean;
 }
 
-const readEnabled = () => {
+const readKey = (k: string) => {
   try {
-    return localStorage.getItem(KEY) === "1";
+    return localStorage.getItem(k) === "1";
   } catch {
     return false;
+  }
+};
+const writeKey = (k: string, on: boolean) => {
+  try {
+    localStorage.setItem(k, on ? "1" : "0");
+  } catch {
+    /* ignore */
   }
 };
 
@@ -53,7 +68,7 @@ const year0 = new Date().getFullYear();
 // their own state, the recap marked one finished while the rail button watched the other
 const G = window as unknown as { __recapStore?: { state: RecapState; listeners: Set<() => void> } };
 const store = (G.__recapStore ??= {
-  state: { enabled: readEnabled(), year: year0, open: false, mixer: false, flyNow: 0, ...flagsFor(year0) },
+  state: { enabled: readKey(KEY), year: year0, open: false, mixer: false, flyNow: 0, eligible: null, eligibleYear: null, force: readKey(FORCE_KEY), ...flagsFor(year0) },
   listeners: new Set(),
 });
 
@@ -83,20 +98,38 @@ export const markRecapDocked = () => {
   set({ docked: true });
 };
 
-(window as unknown as Record<string, unknown>).__recap = (arg?: boolean | number) => {
+let asking: number | null = null;
+/** asks main once per year whether there's enough for a recap; the rail button waits on the answer */
+export function checkRecapEligible(): void {
+  const year = store.state.year;
+  if (store.state.eligibleYear === year || asking === year || !window.clips?.recapEligible) return;
+  asking = year;
+  window.clips
+    .recapEligible(year)
+    .then((r) => {
+      if (store.state.year === year) set({ eligible: Boolean(r?.ok), eligibleYear: year });
+      if (r && !r.ok) console.info(`recap: ${year} has ${r.clips} clips on ${r.days} days, needs ${r.need.clips} on ${r.need.days}. __recap("force") shows the button anyway`);
+    })
+    .catch(() => store.state.year === year && set({ eligible: false, eligibleYear: year }))
+    .finally(() => {
+      if (asking === year) asking = null;
+    });
+}
+
+(window as unknown as Record<string, unknown>).__recap = (arg?: boolean | number | "force") => {
   const on = arg !== false;
-  try {
-    localStorage.setItem(KEY, on ? "1" : "0");
-  } catch {
-    /* ignore */
-  }
+  writeKey(KEY, on);
   if (!on) {
-    set({ enabled: false, open: false });
+    writeKey(FORCE_KEY, false);
+    set({ enabled: false, open: false, force: false });
     return "recap: button hidden";
   }
-  const year = typeof arg === "number" ? arg : new Date().getFullYear();
-  set({ enabled: true, year, ...flagsFor(year) });
-  return `recap: button shown for ${year}`;
+  const force = arg === "force" || store.state.force;
+  if (arg === "force") writeKey(FORCE_KEY, true);
+  const year = typeof arg === "number" ? arg : store.state.year;
+  set({ enabled: true, year, force, ...(year !== store.state.year ? { eligible: null, eligibleYear: null } : {}), ...flagsFor(year) });
+  if (!force) checkRecapEligible();
+  return force ? `recap: button forced on for ${year}` : `recap: button on for ${year}, it shows if the year has enough clips`;
 };
 
 (window as unknown as Record<string, unknown>).__recapFly = () => {

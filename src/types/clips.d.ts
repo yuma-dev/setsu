@@ -575,6 +575,8 @@ export interface RecapData {
     bytes: number;
     named: number;
     trimmed: number;
+    /** clips whose length isn't known (no thumbnail metadata yet); their seconds are missing from seconds */
+    noDuration?: number;
     activeDays: number;
     streak: { a: number; b: number; len: number } | null;
     /** latest clip of a night, "04:57" */
@@ -602,6 +604,14 @@ export interface RecapData {
     top: RecapWatchTop | null;
   };
   longestTitle: string | null;
+}
+
+/** whether a year has enough for the recap, from main's clip list alone */
+export interface RecapEligibility {
+  ok: boolean;
+  clips: number;
+  days: number;
+  need: { clips: number; days: number };
 }
 
 export interface RecapWatchTop {
@@ -670,6 +680,8 @@ export interface ClipsApi {
   runGameBackfill(): Promise<{ tagged: number; without: number } | { error: string } | null>;
 
   getRecap(year: number): Promise<RecapData>;
+  /** cheap, cached ten minutes in main; the rail button only shows when ok */
+  recapEligible(year: number): Promise<RecapEligibility>;
   /** https urls and file paths to data urls, null where one failed */
   recapInlineImages(srcs: string[]): Promise<Record<string, string | null>>;
   /** card is the exported png as a data url; works signed out too, as an anonymous share */

@@ -168,6 +168,7 @@ const api = {
 
   // year recap
   getRecap: invoke("get-recap"),
+  recapEligible: invoke("recap-eligible"),
   recapInlineImages: invoke("recap-inline-images"),
   saveRecapCard: invoke("save-recap-card"),
   copyRecapCard: invoke("copy-recap-card"),

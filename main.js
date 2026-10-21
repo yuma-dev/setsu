@@ -2153,6 +2153,7 @@ ipcMain.handle('get-library-games', (event, clipNames) => gamesModule.getLibrary
 ipcMain.handle('get-played-games', () => gamesModule.getPlayedGames());
 
 ipcMain.handle('get-recap', (event, year) => recapModule.getRecap(year, getSettings));
+ipcMain.handle('recap-eligible', (event, year) => recapModule.recapEligible(year, getSettings));
 ipcMain.handle('recap-inline-images', (event, srcs) => recapModule.inlineImages(srcs));
 ipcMain.handle('save-recap-card', (event, dataUrl, fileName) => recapModule.saveCard(mainWindow, dataUrl, fileName));
 ipcMain.handle('copy-recap-card', (event, dataUrl) => recapModule.copyCard(dataUrl));

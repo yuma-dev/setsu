@@ -151,6 +151,7 @@
 .rc-h1 {
   font: 600 48px/1.1 var(--rc-display);
   text-wrap: balance;
+  overflow-wrap: anywhere;
 }
 .rc-h1-52 {
   font-size: 52px;
@@ -192,6 +193,7 @@
 }
 .rc-big {
   font: 800 120px/0.9 var(--rc-display);
+  white-space: nowrap;
 }
 /* an answer's verdict: how close, as a word, a percent counting up and a meter filling */
 @property --rc-n {
@@ -594,8 +596,10 @@
   border-color: rgba(232, 11, 238, 0.6);
 }
 .rc-who-name {
+  max-width: 100%;
   font: 600 16px/1.2 var(--rc-sans);
   text-align: center;
+  overflow-wrap: anywhere;
 }
 .rc-friend {
   display: flex;
@@ -613,6 +617,12 @@
   font: 400 14px/1 var(--rc-mono);
   color: rgba(243, 241, 247, 0.5);
 }
+.rc-friend-name,
+.rc-friend-user {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .rc-friend-n {
   font: 700 64px/1 var(--rc-display);
 }
@@ -622,7 +632,9 @@
 }
 .rc-friend-game {
   flex: 1;
+  min-width: 0;
   font: 500 16px/1.2 var(--rc-sans);
+  overflow-wrap: anywhere;
 }
 .rc-friend-gn {
   font: 500 14px/1 var(--rc-mono);
@@ -773,9 +785,22 @@
   font: 600 54px/1.15 var(--rc-display);
   text-wrap: balance;
 }
+/* clip titles are free text and some are paragraphs */
+.rc-rp-title,
+.rc-rp-name {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
 .rc-rp-meta {
-  font: 400 20px/1 var(--rc-sans);
+  max-width: 1300px;
+  font: 400 20px/1.2 var(--rc-sans);
   color: rgba(243, 241, 247, 0.6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 /* the clip's bar runs the window's full width, a tall strip to grab with a thin track inside */
 .rc-vp {
@@ -856,8 +881,10 @@
   color: #fff;
 }
 .rc-rp-name {
+  max-width: 1000px;
   font: 600 32px/1.25 var(--rc-sans);
   text-wrap: balance;
+  -webkit-line-clamp: 2;
 }
 
 /* 06 star chart */
@@ -1078,10 +1105,12 @@
 }
 .rc-front-saved {
   font: 600 19px/1 var(--rc-sans);
+  white-space: nowrap;
 }
 .rc-front-footage {
   font: 400 14px/1 var(--rc-mono);
   color: rgba(243, 241, 247, 0.62);
+  white-space: nowrap;
 }
 .rc-art {
   position: relative;
@@ -1176,7 +1205,25 @@
   font: 400 12px/1 var(--rc-mono);
   color: rgba(243, 241, 247, 0.5);
 }
+/* a long name or handle ends in dots before it reaches the score; the handle gives way first */
+.rc-front-foot > :first-child {
+  min-width: 0;
+}
+.rc-front-foot > :last-child {
+  flex: none;
+}
+.rc-front-name,
+.rc-front-handle {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rc-front-handle {
+  flex-shrink: 100;
+}
 .rc-front-score {
+  white-space: nowrap;
   font: 500 11px/1 var(--rc-mono);
   letter-spacing: 0.14em;
   color: rgba(243, 241, 247, 0.55);

@@ -21,6 +21,10 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 const TRIM_SLACK_S = 0.5;
 // the recorder sees the owner in every voice clip, anyone under this share is a friend
 const OWNER_SHARE = 0.6;
+// below this a year has too little for the recap: the clock, the stack and the type all read as
+// noise, and three days at least make it a year of clipping, not one evening
+const MIN_CLIPS = 10;
+const MIN_DAYS = 3;
 
 // Date.UTC keeps a DST change from shifting the day count
 const dayOfYear = (d) => Math.round((Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) - Date.UTC(d.getFullYear(), 0, 1)) / 864e5);
@@ -28,6 +32,10 @@ const fmtDay = (d) => `${MONTHS[d.getMonth()]} ${d.getDate()}`;
 const pad = (n) => String(n).padStart(2, '0');
 
 const tally = (map, key, by = 1) => map.set(key, (map.get(key) || 0) + by);
+const validDate = (v) => {
+  const d = new Date(v);
+  return Number.isFinite(d.getTime()) ? d : null;
+};
 const top = (map, n) => [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0, n);
 
 async function readJson(file) {
@@ -62,6 +70,39 @@ async function readActivity(year) {
   return out;
 }
 
+// the rail button asks on every launch; a scan per ask would double the library's own at startup
+const eligibleCache = new Map();
+const ELIGIBLE_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * whether a year has enough for the recap, from the clip list alone: clips and distinct days
+ * @param {number} year
+ * @param {Function} getSettings
+ * @returns {Promise<{ok: boolean, clips: number, days: number, need: {clips: number, days: number}}>}
+ */
+async function recapEligible(year, getSettings) {
+  year = Number(year) || new Date().getFullYear();
+  const settings = await getSettings();
+  const key = `${settings?.clipLocation || ''}|${year}`;
+  const hit = eligibleCache.get(key);
+  if (hit && Date.now() - hit.at < ELIGIBLE_TTL_MS) return hit.res;
+  let clips = 0;
+  const days = new Set();
+  try {
+    for (const c of await clipsModule.getClips(getSettings)) {
+      const d = validDate(c.createdAt);
+      if (!d || d.getFullYear() !== year) continue;
+      clips++;
+      days.add(dayOfYear(d));
+    }
+  } catch {
+    // no readable clip folder, nothing to recap
+  }
+  const res = { ok: clips >= MIN_CLIPS && days.size >= MIN_DAYS, clips, days: days.size, need: { clips: MIN_CLIPS, days: MIN_DAYS } };
+  eligibleCache.set(key, { at: Date.now(), res });
+  return res;
+}
+
 /**
  * @param {number} year
  * @param {Function} getSettings
@@ -74,7 +115,7 @@ async function getRecap(year, getSettings) {
   const now = new Date();
 
   const all = await clipsModule.getClips(getSettings);
-  const inYear = all.filter((c) => new Date(c.createdAt).getFullYear() === year);
+  const inYear = all.filter((c) => validDate(c.createdAt)?.getFullYear() === year);
   let sidecars = new Set();
   try {
     sidecars = new Set((await fs.readdir(metaDir)).map((f) => f.toLowerCase()));
@@ -110,6 +151,7 @@ async function getRecap(year, getSettings) {
     }
     const realTrim =
       trim && duration > 0 && Number.isFinite(trim.start) && Number.isFinite(trim.end) &&
+      trim.end - trim.start > TRIM_SLACK_S &&
       (trim.start > TRIM_SLACK_S || trim.end < duration - TRIM_SLACK_S)
         ? { start: Math.max(0, trim.start), end: Math.min(duration, trim.end) }
         : null;
@@ -149,7 +191,7 @@ async function getRecap(year, getSettings) {
   let owner = null;
   if (isOwner) {
     const p = latestOf(ownerId);
-    owner = { id: ownerId, name: p.global_name || p.nick || p.username, handle: p.username, avatar: p.avatar_url };
+    owner = { id: ownerId, name: p.global_name || p.nick || p.username || 'You', handle: p.username || '', avatar: p.avatar_url || null };
   }
   const friendsIn = (c) => (c.discord ? c.discord.participants.filter((p) => !p.bot && p.id !== owner?.id) : []);
 
@@ -208,8 +250,8 @@ async function getRecap(year, getSettings) {
   const friendList = [...fr.values()].sort((a, b) => b.clips - a.clips).slice(0, 5);
   const friends = friendList.map((f, i) => ({
     id: f.id,
-    name: f.p.nick || f.p.global_name || f.p.username,
-    user: f.p.username,
+    name: f.p.nick || f.p.global_name || f.p.username || 'A friend',
+    user: f.p.username || '',
     clips: f.clips,
     first: f.first,
     games: top(f.games, 3).map(([id, n]) => refN(id, n)),
@@ -280,19 +322,23 @@ async function getRecap(year, getSettings) {
     const duration = c ? c.duration : Number(meta?.duration) || 0;
     const trim = c ? c.trim : lib.isTrimmed ? await readJson(side(file, 'trim')) : null;
     const info = c ? null : has(file, 'gameinfo') ? await readJson(side(file, 'gameinfo')) : null;
-    const date = c ? c.date : new Date(lib.createdAt);
+    const date = c ? c.date : validDate(lib.createdAt);
     const thumb = c ? c.thumbnailPath : lib.thumbnailPath;
-    const end = trim?.end > 0 ? Math.min(trim.end, duration || trim.end) : duration;
+    // with no known length the clip plays its last 25 s from the trim, or from the start, until
+    // the video itself ends
+    const known = trim?.end > 0 ? Math.min(trim.end, duration || trim.end) : duration;
+    const start = Math.max(0, trim?.start > 0 ? trim.start : 0, known - 25);
+    const end = known > start ? known : start + 25;
     return {
       file,
-      title: c ? c.title : lib.customName,
+      title: (c ? c.title : lib.customName) || path.basename(file, path.extname(file)),
       sessions: w.real,
       seconds: w.seconds,
       video: path.join(folder, file),
-      poster: (await fs.access(thumb).then(() => true, () => false)) ? thumb : null,
+      poster: thumb && (await fs.access(thumb).then(() => true, () => false)) ? thumb : null,
       game: (c ? c.game : metadata.normalizeGame(info?.game))?.name || null,
-      date: date.getFullYear() === year ? fmtDay(date) : `${fmtDay(date)}, ${date.getFullYear()}`,
-      start: Math.max(0, trim?.start > 0 ? trim.start : 0, end - 25),
+      date: !date ? '' : date.getFullYear() === year ? fmtDay(date) : `${fmtDay(date)}, ${date.getFullYear()}`,
+      start,
       end,
       speed: c ? c.speed : 1
     };
@@ -316,6 +362,7 @@ async function getRecap(year, getSettings) {
     clips: {
       count: clips.length,
       seconds: Math.round(clips.reduce((s, c) => s + c.duration, 0)),
+      noDuration: clips.filter((c) => !(c.duration > 0)).length,
       bytes: clips.reduce((s, c) => s + c.bytes, 0),
       named: clips.filter((c) => c.named).length,
       trimmed: n,
@@ -423,4 +470,4 @@ async function setShare(year, entry) {
   await fs.writeFile(sharesFile(), JSON.stringify(all, null, 2));
 }
 
-module.exports = { getRecap, inlineImages, saveCard, copyCard, loadMix, saveMix, getShare, setShare };
+module.exports = { getRecap, recapEligible, inlineImages, saveCard, copyCard, loadMix, saveMix, getShare, setShare };

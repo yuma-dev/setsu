@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef } from "react";
-import { markRecapDocked, openRecap, useRecap } from "../recap/recapStore";
+import { checkRecapEligible, markRecapDocked, openRecap, useRecap } from "../recap/recapStore";
 
 // the Setsu star, filled pearl like the recap's year
 const STAR = "M500 63A437 437 0 0 0 937 500A437 437 0 0 0 500 937A437 437 0 0 0 63 500A437 437 0 0 0 500 63Z";
@@ -278,10 +278,19 @@ function flyToSettings(pill: HTMLElement, done: () => void): void {
   requestAnimationFrame(step);
 }
 
-// sits above the update pill; only there once __recap() turned it on. after the recap was seen
-// through it flies into settings once and from then on only shows in the settings rail
+// sits above the update pill; only there once __recap() turned it on and the year has enough to
+// recap. after the recap was seen through it flies into settings once and from then on only shows
+// in the settings rail
 function RecapPill({ inSettings }: { inSettings: boolean }) {
-  const { enabled, year, open, finished, docked, flyNow } = useRecap();
+  const { enabled: on, year, open, finished, docked, flyNow, eligible, force } = useRecap();
+  // asked a while after launch: the check scans the clip list, and at launch the library is doing
+  // the same
+  useEffect(() => {
+    if (!on || force) return;
+    const t = window.setTimeout(checkRecapEligible, 2500);
+    return () => window.clearTimeout(t);
+  }, [on, force, year]);
+  const enabled = on && (force || eligible === true);
   const ref = useRef<HTMLButtonElement>(null);
   const flying = useRef(false);
   const launch = () => {

@@ -39,6 +39,7 @@ export const MARKS: Array<[string, number]> = [
   ["The Moon", 384400000],
 ];
 export const END_REF: Array<[string, number, string]> = [
+  ["the Burj Khalifa", 828, "burj"],
   ["Mount Everest", 8849, "mountain"],
   ["a cruising airliner", 11000, "plane"],
   ["the edge of space", 1e5, "karman"],
@@ -77,6 +78,13 @@ export const eob = (p: number) => {
   return 1 + c3 * Math.pow(p - 1, 3) + c1 * Math.pow(p - 1, 2);
 };
 export const pad = (n: number) => String(n).padStart(2, "0");
+/** "1 clip", "3 clips"; the plural is the word plus s unless given */
+export const plural = (n: number, word: string, many = word + "s") => `${fmtN(n)} ${Math.round(n) === 1 ? word : many}`;
+/** a count or size from main that might be missing or broken, as a finite number >= 0 */
+const num = (v: unknown) => {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+};
 export const fmtN = (n: number) => Math.round(n).toLocaleString("en-US");
 export const pct = (x: number) => Math.round(x * 100) + "%";
 export const fmtLen = (m: number) =>
@@ -84,13 +92,18 @@ export const fmtLen = (m: number) =>
     ? (m * 100).toFixed(1) + " cm"
     : m < 1000
       ? m.toFixed(1) + " m"
-      : (m / 1000).toLocaleString("en-US", { maximumFractionDigits: 1, minimumFractionDigits: 1 }) + " km";
+      : m < 1e7
+        ? (m / 1000).toLocaleString("en-US", { maximumFractionDigits: 1, minimumFractionDigits: 1 }) + " km"
+        : fmtN(m / 1000) + " km";
 export const fmtAlt = (m: number) =>
   m < 10 ? m.toFixed(1) + " m" : m < 1000 ? Math.round(m) + " m" : m < 1e5 ? (m / 1000).toFixed(1) + " km" : fmtN(m / 1000) + " km";
 export const fmtHM = (s: number) => {
-  const h = Math.floor(s / 3600);
-  const m = Math.round((s % 3600) / 60);
-  return h ? `${h} h ${pad(m)} m` : `${m} min`;
+  // rounded to the minute first, or 59.5 minutes read "60 min"
+  const t = Math.round(s / 60);
+  const h = Math.floor(t / 60);
+  const m = t % 60;
+  if (h) return `${h} h ${pad(m)} m`;
+  return t ? `${t} min` : `${Math.round(s)} s`;
 };
 export const fmtHMS = (s: number) => `${Math.floor(s / 3600)}:${pad(Math.floor((s % 3600) / 60))}:${pad(Math.round(s % 60))}`;
 /** a share of a minute as m:ss */
@@ -128,6 +141,7 @@ export const shortName = (n: string) => {
 
 /** the reference that makes the number feel closest, within about 3x either way */
 export function pickRef(list: Array<[string, number, string]>, actual: number): Ref {
+  if (!(actual > 0)) return { name: list[0][0], h: list[0][1], kind: list[0][2] };
   let best: [string, number, string] | null = null;
   let bs = 1e9;
   for (const r of list) {
@@ -183,35 +197,72 @@ export interface Owner {
 
 export type Model = ReturnType<typeof buildModel>;
 
+const tidy = (v: unknown) => (typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f-\u009f]/g, "").trim() : "");
+
 export function buildModel(R: RecapData, owner: Owner) {
-  const cal = calendar(R.year);
-  const C = R.clips;
-  const games: Game[] = R.games.map((g) => ({ name: g.name, srcs: srcsOf(g), color: g.color, lch: parseL(g.color) }));
-  const ref = (g: RecapGameRef & { n: number }) => ({ name: g.name, n: g.n, srcs: srcsOf(g) });
-  const pts = R.pts;
+  const year = Number.isInteger(R.year) ? R.year : new Date().getFullYear();
+  const cal = calendar(year);
+  // whatever main sent, as finite numbers: an older main or a half-written log leaves holes
+  const RC = R.clips ?? ({} as Partial<RecapData["clips"]>);
+  const C = {
+    count: num(RC.count),
+    seconds: num(RC.seconds),
+    bytes: num(RC.bytes),
+    named: num(RC.named),
+    trimmed: num(RC.trimmed),
+    noDuration: num(RC.noDuration),
+    activeDays: num(RC.activeDays),
+    streak: RC.streak && RC.streak.len > 0 ? RC.streak : null,
+    latest: RC.latest ?? null,
+  };
+  const counts = (o: Record<string, number> | undefined) => {
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(o ?? {})) if (num(v)) out[k] = num(v);
+    return out;
+  };
+  const games: Game[] = (R.games ?? []).map((g) => ({ name: tidy(g.name) || "A game", srcs: srcsOf(g), color: g.color, lch: parseL(g.color) }));
+  const ref = (g: RecapGameRef & { n: number }) => ({ name: tidy(g.name) || "A game", n: num(g.n), srcs: srcsOf(g) });
+  const pts = (R.pts ?? []).filter((p) => Array.isArray(p) && p.length >= 5 && p.every((v) => Number.isFinite(v)));
   const hasGames = games.length > 0;
-  const byHour = R.byHour;
-  const tot = byHour.reduce((a, b) => a + b, 0) || 1;
+  const byHour = Array.from({ length: 24 }, (_, i) => num(R.byHour?.[i]));
+  const hours = byHour.reduce((a, b) => a + b, 0);
+  const tot = hours || 1;
+  // ties go to the earlier hour
   let peak = 0;
   byHour.forEach((v, i) => {
     if (v > byHour[peak]) peak = i;
   });
   const nightShare = byHour.reduce((a, v, i) => a + (i >= 20 || i < 6 ? v : 0), 0) / tot;
-  const firstDay = pts.length ? Math.min(...pts.map((p) => p[0])) : 0;
+  // loops, not Math.min(...pts): a spread of a big library overflows the call stack
+  let firstDay = Infinity;
+  let lastDay = -Infinity;
+  for (const p of pts) {
+    if (p[0] < firstDay) firstDay = p[0];
+    if (p[0] > lastDay) lastDay = p[0];
+  }
+  if (!pts.length) firstDay = lastDay = 0;
   const dayMin = cal.ms[cal.monthOf(firstDay)];
-  const dayMax = pts.length ? Math.max(...pts.map((p) => p[0])) + 1 : dayMin + 1;
-  const friends: Friend[] = R.friends
-    .slice()
+  const dayMax = pts.length ? lastDay + 1 : dayMin + 1;
+  const friends: Friend[] = (R.friends ?? [])
+    .filter((f) => num(f.clips) > 0)
     .sort((a, b) => b.clips - a.clips)
-    .map((f) => ({ ...f, games: f.games.map(ref), lc: parseL(f.color) }));
-  const trims = R.trims;
-  const hasTrims = trims.n >= 5 && trims.surv.length > 0;
-  const act = R.act;
-  const exports = R.exports;
+    .map((f) => ({ ...f, name: tidy(f.name) || "A friend", user: tidy(f.user), color: f.color || "oklch(.75 .12 250)", games: (f.games ?? []).map(ref), lc: parseL(f.color) }));
+  // averages from main, held to a share of the clip with the start before the end
+  const tr = R.trims ?? { n: 0, s: 0, e: 0, surv: [] };
+  const ts = cl(Number.isFinite(tr.s) ? tr.s : 0);
+  const trims = {
+    n: num(tr.n),
+    s: ts,
+    e: Math.max(ts, cl(Number.isFinite(tr.e) ? tr.e : 1)),
+    surv: Array.from({ length: 60 }, (_, i) => cl(Number.isFinite(tr.surv?.[i]) ? tr.surv[i] : 0)),
+  };
+  const hasTrims = trims.n >= 5 && trims.e > trims.s;
+  const act = counts(R.act);
+  const exports = counts(R.exports);
   const exportsTotal = Object.values(exports).reduce((a, b) => a + b, 0);
   const clipN = (exports.trimmed_clipboard || 0) + (exports.clipboard || 0);
   const clipShare = exportsTotal ? clipN / exportsTotal : 0;
-  const since = R.voiceDay == null ? [] : pts.filter((p) => p[0] >= R.voiceDay!);
+  const since = R.voiceDay == null || !Number.isFinite(R.voiceDay) ? [] : pts.filter((p) => p[0] >= R.voiceDay!);
   const crewShare = friends.length && since.length ? since.filter((p) => p[4] > 0).length / since.length : 0;
   const trimShare = C.count ? C.trimmed / C.count : 0;
   const code =
@@ -219,22 +270,35 @@ export function buildModel(R: RecapData, owner: Owner) {
     (trimShare >= 0.25 ? "C" : "K") +
     (exportsTotal && clipShare < 0.6 ? "L" : "P") +
     (crewShare >= 0.5 ? "S" : "O");
-  const frames = Math.round(C.seconds * R.fps);
+  // clips with no known length count at the average of the ones that have one, so a library
+  // still waiting on thumbnails doesn't print a stack of nothing
+  const timed = C.count - C.noDuration;
+  const footage = C.seconds + (timed > 0 ? (C.seconds / timed) * C.noDuration : 0);
+  const frames = Math.round(footage * (num(R.fps) || 60));
   const gc: Record<number, number> = {};
   for (const p of pts) if (p[2] >= 0 && p[2] < 99) gc[p[2]] = (gc[p[2]] || 0) + 1;
   const topGames = Object.keys(gc)
     .map(Number)
+    .filter((i) => games[i])
     .sort((a, b) => gc[b] - gc[a])
     .map((i) => ({ ...games[i], n: gc[i] }));
   return {
     cal,
-    year: R.year,
-    through: R.through,
-    fps: R.fps,
+    year,
+    through: R.through || "",
+    fps: num(R.fps) || 60,
     count: C.count,
     seconds: C.seconds,
     bytes: C.bytes,
     frames,
+    /** any footage to print at all; without it the stack and the line have nothing to show */
+    hasFootage: frames > 0,
+    /** part of the footage is the average standing in for clips of unknown length */
+    footageEstimated: C.noDuration > 0 && timed > 0,
+    /** any clip has an hour; the clock and the night/day type mean nothing without */
+    hasHours: hours > 0,
+    /** anything was ever exported; the link/paste part of the type is a default without */
+    hasExports: exportsTotal > 0,
     // 0.1 mm a printed sheet, 29.7 cm laid end to end
     stackH: frames * 1e-4,
     endH: frames * 0.297,
@@ -249,9 +313,9 @@ export function buildModel(R: RecapData, owner: Owner) {
     dayMax,
     activeDays: C.activeDays,
     streak: C.streak ?? { a: 0, b: 0, len: 0 },
-    latest: C.latest ? { t: C.latest.t, date: cal.fmtD(C.latest.day) } : null,
+    latest: C.latest && C.latest.t ? { t: C.latest.t, date: cal.fmtD(num(C.latest.day)) } : null,
     friends,
-    pairs: R.pairs,
+    pairs: counts(R.pairs),
     trims,
     hasTrims,
     trimmed: C.trimmed,
@@ -260,11 +324,11 @@ export function buildModel(R: RecapData, owner: Owner) {
     exports,
     exportsTotal,
     clipN,
-    speeds: R.speeds,
-    watch: R.watch.top,
-    watchSec: R.watch.seconds,
-    longestTitle: R.longestTitle,
+    speeds: counts(R.speeds),
+    watch: R.watch?.top ? { ...R.watch.top, title: tidy(R.watch.top.title) || tidy(R.watch.top.file).replace(/\.[^.]+$/, "") } : null,
+    watchSec: num(R.watch?.seconds),
+    longestTitle: tidy(R.longestTitle) || null,
     code,
-    owner,
+    owner: { name: tidy(owner.name) || "You", handle: tidy(owner.handle), av: owner.av || null },
   };
 }
