@@ -1,0 +1,643 @@
+{
+  "v": 1,
+  "year": 2026,
+  "through": "Oct 21",
+  "owner": {
+    "name": "Nova",
+    "handle": "nova.exe",
+    "avatar": null
+  },
+  "type": {
+    "code": "NCPS",
+    "name": "Midnight Snack Crew",
+    "line": "You trim the crew's late-night bits and paste them in the group chat."
+  },
+  "clips": 352,
+  "footage": 24760,
+  "bytes": 41300000000,
+  "activeDays": 131,
+  "streak": {
+    "days": 11,
+    "from": "Mar 3",
+    "to": "Mar 13"
+  },
+  "peakHour": 22,
+  "byHour": [
+    9,
+    5,
+    3,
+    1,
+    0,
+    0,
+    0,
+    1,
+    2,
+    3,
+    5,
+    6,
+    9,
+    11,
+    13,
+    15,
+    17,
+    21,
+    26,
+    31,
+    38,
+    44,
+    52,
+    40
+  ],
+  "nightShare": 0.545,
+  "day": {
+    "palette": [
+      "oklch(.70 .2 320)",
+      "oklch(.78 .14 70)",
+      "oklch(.78 .13 180)",
+      "oklch(.79 .16 140)",
+      "oklch(.78 .13 15)",
+      "oklch(0.660 0.070 285.0)",
+      "oklch(0.500 0.030 300.0)"
+    ],
+    "cols": [
+      [],
+      [
+        0
+      ],
+      [
+        0,
+        1
+      ],
+      [
+        0,
+        0,
+        1
+      ],
+      [
+        0,
+        1,
+        2,
+        3,
+        5
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        3,
+        5
+      ],
+      [
+        0,
+        0,
+        0,
+        2,
+        2,
+        3,
+        3,
+        4,
+        4
+      ],
+      [
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        2,
+        4,
+        5,
+        5
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        3,
+        3,
+        4
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        2,
+        2,
+        5,
+        6
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        2,
+        2,
+        2,
+        5,
+        5,
+        5
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        2,
+        3,
+        3,
+        3,
+        5,
+        5,
+        5,
+        6
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        3,
+        3,
+        4,
+        6,
+        6
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        3,
+        3,
+        3,
+        4,
+        4,
+        5,
+        5,
+        5,
+        5,
+        5,
+        6
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        2,
+        2,
+        2,
+        2,
+        3,
+        3,
+        3,
+        4,
+        4,
+        4,
+        4,
+        5,
+        5,
+        5,
+        5,
+        5,
+        5,
+        6
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        2,
+        2,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        4,
+        4,
+        4,
+        4,
+        4,
+        5,
+        5
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        4,
+        5,
+        5,
+        5,
+        5,
+        5,
+        5,
+        6
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        3,
+        3,
+        5,
+        5,
+        5,
+        5,
+        5,
+        5,
+        5,
+        6,
+        6,
+        6
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        3,
+        4,
+        5
+      ],
+      [
+        0,
+        0,
+        0,
+        3,
+        5
+      ],
+      [
+        1,
+        2,
+        5
+      ],
+      [
+        0
+      ],
+      [],
+      []
+    ]
+  },
+  "games": [
+    {
+      "name": "Starfall Arena",
+      "icon": null,
+      "color": "oklch(.70 .2 320)",
+      "clips": 152
+    },
+    {
+      "name": "Drift Protocol",
+      "icon": null,
+      "color": "oklch(.78 .14 70)",
+      "clips": 96
+    },
+    {
+      "name": "Hollow Orbit",
+      "icon": null,
+      "color": "oklch(.78 .13 180)",
+      "clips": 61
+    },
+    {
+      "name": "Neon Siege",
+      "icon": null,
+      "color": "oklch(.79 .16 140)",
+      "clips": 33
+    },
+    {
+      "name": "Pocket Kingdoms",
+      "icon": null,
+      "color": "oklch(.78 .13 15)",
+      "clips": 18
+    }
+  ],
+  "stack": {
+    "meters": 148.6,
+    "ref": "the Eiffel Tower",
+    "refMeters": 330
+  },
+  "line": {
+    "meters": 441223,
+    "ref": "the Space Station",
+    "refMeters": 408000
+  },
+  "trim": {
+    "from": 0.584,
+    "to": 0.951
+  },
+  "stats": [
+    {
+      "label": "CLIPS SAVED",
+      "value": "352",
+      "note": "41.3 GB on disk"
+    },
+    {
+      "label": "OF FOOTAGE",
+      "value": "6 h 53 m",
+      "note": "131 days with a clip"
+    },
+    {
+      "label": "DAY STREAK",
+      "value": "11",
+      "note": "Mar 3 to Mar 13"
+    },
+    {
+      "label": "REWATCHES",
+      "value": "1,212",
+      "note": "7 h 40 m of watching"
+    },
+    {
+      "label": "EXPORTS",
+      "value": "268",
+      "note": "214 copied · 31 links · 23 files"
+    },
+    {
+      "label": "RENAMES",
+      "value": "388",
+      "note": "97 clips have a real name"
+    },
+    {
+      "label": "TRIMS",
+      "value": "351",
+      "note": "across 140 clips"
+    },
+    {
+      "label": "FAVOURITES",
+      "value": "54",
+      "note": ""
+    },
+    {
+      "label": "SPEED CHANGES",
+      "value": "190",
+      "note": "mostly 1.25×"
+    },
+    {
+      "label": "DELETED",
+      "value": "122",
+      "note": ""
+    },
+    {
+      "label": "VOLUME TWEAKS",
+      "value": "87",
+      "note": ""
+    }
+  ],
+  "chips": [
+    {
+      "label": "MAIN GAME",
+      "value": "Starfall Arena",
+      "icon": null,
+      "round": false
+    },
+    {
+      "label": "DUO",
+      "value": "Kestrel",
+      "icon": null,
+      "round": true
+    },
+    {
+      "label": "LONGEST STREAK",
+      "value": "11 days",
+      "icon": null,
+      "round": false
+    },
+    {
+      "label": "TRIM EDITS",
+      "value": "351",
+      "icon": null,
+      "round": false
+    }
+  ],
+  "rewatch": {
+    "title": "the 1v4 nobody believed",
+    "count": 14
+  },
+  "guesses": [
+    {
+      "q": "stack",
+      "tier": "close"
+    },
+    {
+      "q": "end",
+      "tier": "off"
+    },
+    {
+      "q": "hour",
+      "tier": "spot"
+    },
+    {
+      "q": "who",
+      "tier": "near"
+    },
+    {
+      "q": "cut",
+      "tier": "close"
+    },
+    {
+      "q": "rw",
+      "tier": "spot"
+    }
+  ],
+  "friends": [
+    {
+      "name": "Kestrel",
+      "avatar": null,
+      "clips": 88
+    },
+    {
+      "name": "mothboy",
+      "avatar": null,
+      "clips": 71
+    },
+    {
+      "name": "Juno",
+      "avatar": null,
+      "clips": 40
+    },
+    {
+      "name": "Sable",
+      "avatar": null,
+      "clips": 9
+    }
+  ]
+}

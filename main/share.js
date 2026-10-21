@@ -198,7 +198,7 @@ async function parseJsonSafe(text) {
 const KNOWN_API_SEGMENTS = new Set([
   'auth', 'me', 'token', 'tokens', 'users', 'banner', 'clips', 'comments',
   'reactions', 'favorite', 'share', 'notifications', 'feed', 'tags', 'stats',
-  'waveform', 'stream', 'preview'
+  'waveform', 'stream', 'preview', 'recaps'
 ]);
 
 // low-cardinality telemetry template, e.g. /clips/abc123/comments?limit=20
@@ -903,6 +903,80 @@ async function fetchMentionableUsers(getSettings, overrides = {}) {
 }
 
 /**
+ * posts a year recap: the payload json and the card png. signed in it goes to the account; without
+ * an account it goes up anonymous, and `prev` (the id and delete key from the last post) makes the
+ * server replace that share and keep its link. see docs/recap-share-api.md
+ * @param {Function} getSettings
+ * @param {{payload: object, card: string, prev?: {id: string, deleteKey: string} | null}} input - card as a png data url
+ * @returns {Promise<{success: boolean, status?: number, data?: any, anonymous?: boolean, error?: string}>}
+ */
+async function shareRecap(getSettings, input = {}) {
+  const settings = await getSettings();
+  const { serverUrl, apiToken } = await resolveSharingConfig(settings);
+  const card = typeof input.card === 'string' ? input.card.match(/^data:image\/png;base64,(.+)$/) : null;
+  if (!card || !input.payload || typeof input.payload !== 'object') {
+    return { success: false, error: 'Nothing to share.' };
+  }
+  const form = new FormData();
+  form.append('payload', JSON.stringify(input.payload));
+  form.append('card', new Blob([Buffer.from(card[1], 'base64')], { type: 'image/png' }), 'card.png');
+  // an anonymous share is replaced by proving it's ours; a signed-in one by account and year
+  if (!apiToken && input.prev?.id && input.prev?.deleteKey) {
+    form.append('id', String(input.prev.id));
+    form.append('key', String(input.prev.deleteKey));
+  }
+  const headers = apiToken ? { Authorization: `Bearer ${apiToken}` } : {};
+  try {
+    const { response, bodyText, bodyJson } = await fetchWithTimeout(
+      `${serverUrl}/api/recaps`,
+      { method: 'POST', headers, body: form },
+      60000,
+      '/recaps'
+    );
+    if (response.status === 201 && bodyJson?.id && bodyJson?.url && bodyJson?.deleteKey) {
+      return { success: true, status: 201, data: bodyJson, anonymous: !apiToken };
+    }
+    return {
+      success: false,
+      status: response.status,
+      anonymous: !apiToken,
+      error: buildErrorMessage(response.status, bodyJson, bodyText, 'Sharing failed.')
+    };
+  } catch (error) {
+    if (error?.name === 'AbortError') return { success: false, error: 'Sharing timed out.' };
+    return { success: false, error: `Sharing failed: ${error.message}` };
+  }
+}
+
+/**
+ * takes a recap share down: with the account when signed in, else (or when the account says no)
+ * with the delete key, which works signed out. 404 means it's already gone, which counts
+ * @param {Function} getSettings
+ * @param {{id: string, deleteKey?: string}} share
+ * @returns {Promise<{success: boolean, status?: number, error?: string}>}
+ */
+async function unshareRecap(getSettings, share = {}) {
+  if (!share.id) return { success: true };
+  const settings = await getSettings();
+  const { serverUrl, apiToken } = await resolveSharingConfig(settings);
+  const url = `${serverUrl}/api/recaps/${encodeURIComponent(share.id)}`;
+  const tries = [];
+  if (apiToken) tries.push({ url, headers: { Authorization: `Bearer ${apiToken}` } });
+  if (share.deleteKey) tries.push({ url: `${url}?key=${encodeURIComponent(share.deleteKey)}`, headers: {} });
+  let last = { success: false, error: 'Nothing to remove the share with.' };
+  for (const t of tries) {
+    try {
+      const { response, bodyText, bodyJson } = await fetchWithTimeout(t.url, { method: 'DELETE', headers: t.headers }, CONNECTION_TIMEOUT_MS, '/recaps/:id');
+      if (response.status === 204 || response.status === 404) return { success: true, status: response.status };
+      last = { success: false, status: response.status, error: buildErrorMessage(response.status, bodyJson, bodyText, 'Could not stop sharing.') };
+    } catch (error) {
+      last = { success: false, error: error?.name === 'AbortError' ? 'Request timed out.' : `Could not stop sharing: ${error.message}` };
+    }
+  }
+  return last;
+}
+
+/**
  * authenticated JSON request against the Setsu API; Bearer token stays main-side
  * @param {Function} getSettings
  * @param {{method?: string, path?: string, body?: any}} request - path relative to `/api`
@@ -1033,5 +1107,7 @@ module.exports = {
   fetchMentionableUsers,
   apiRequest,
   uploadProfileBanner,
+  shareRecap,
+  unshareRecap,
   installMediaAuthHeaders
 };

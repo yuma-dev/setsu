@@ -166,6 +166,18 @@ const api = {
   setClipGame: invoke("set-clip-game"),
   runGameBackfill: invoke("run-game-backfill"),
 
+  // year recap
+  getRecap: invoke("get-recap"),
+  recapInlineImages: invoke("recap-inline-images"),
+  saveRecapCard: invoke("save-recap-card"),
+  copyRecapCard: invoke("copy-recap-card"),
+  loadRecapMix: invoke("load-recap-mix"),
+  shareRecap: invoke("recap-share"),
+  recapShareState: invoke("recap-share-state"),
+  unshareRecap: invoke("recap-unshare"),
+  openRecapShare: invoke("recap-open-share"),
+  saveRecapMix: invoke("save-recap-mix"),
+
   // per-clip metadata
   saveCustomName: invoke("save-custom-name"),
   getClipInfo: invoke("get-clip-info"),

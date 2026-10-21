@@ -11,6 +11,7 @@ import VideoPlayer from "./player/VideoPlayer";
 import OnboardingGate from "./onboarding/OnboardingGate";
 import RebrandGate from "./onboarding/RebrandGate";
 import AnalysisIntro from "./onboarding/AnalysisIntro";
+import RecapGate from "./recap/RecapGate";
 import { useClips } from "./library/useClips";
 import { useLibraryFilter } from "./library/useLibraryFilter";
 import { installDebugTools } from "./shell/debugTools";
@@ -351,6 +352,8 @@ export default function App() {
       <RebrandGate />
       {/* the analysis heads-up for anyone past the tour; shows once when the library listen starts */}
       <AnalysisIntro />
+      {/* year recap overlay, opened from its rail pill; the recap itself is a lazy chunk */}
+      <RecapGate />
     </div>
     </AppNavContext.Provider>
   );

@@ -1137,5 +1137,6 @@ module.exports = {
   getGameIcon,
   getGameIconsBatch,
   getClipParticipants,
-  normalizeGame
+  normalizeGame,
+  normalizeDiscordInfo
 };

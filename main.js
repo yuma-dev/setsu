@@ -117,7 +117,9 @@ if (!app.isPackaged && process.env.CLIPS_PERF_STARTUP === '1') {
     'export-video',
     'export-trimmed-video',
     'export-audio',
-    'storage-run'
+    'storage-run',
+    'save-recap-card',
+    'recap-share'
   ]);
   const originalHandle = ipcMain.handle.bind(ipcMain);
   ipcMain.handle = function (channel, handler) {
@@ -231,6 +233,8 @@ const clipdipModule = lazyModule('./main/clipdip');
 const gameBackfillModule = lazyModule('./main/game-backfill');
 // library game list, the Set game picker's search, manual picks
 const gamesModule = lazyModule('./main/games');
+// year recap numbers and its card export
+const recapModule = lazyModule('./main/recap');
 
 // FFmpeg verification (and the NVENC probe it chains) runs from
 // runDeferredServices() once the library is on screen; see there.
@@ -2147,6 +2151,47 @@ ipcMain.handle("get-clip-participants", async (event, clipNames) => {
 ipcMain.handle('get-library-games', (event, clipNames) => gamesModule.getLibraryGames(clipNames, getSettings));
 
 ipcMain.handle('get-played-games', () => gamesModule.getPlayedGames());
+
+ipcMain.handle('get-recap', (event, year) => recapModule.getRecap(year, getSettings));
+ipcMain.handle('recap-inline-images', (event, srcs) => recapModule.inlineImages(srcs));
+ipcMain.handle('save-recap-card', (event, dataUrl, fileName) => recapModule.saveCard(mainWindow, dataUrl, fileName));
+ipcMain.handle('copy-recap-card', (event, dataUrl) => recapModule.copyCard(dataUrl));
+ipcMain.handle('load-recap-mix', () => recapModule.loadMix());
+// a link for the year's recap: shared again it keeps the same link. signed out it still works, as
+// an anonymous share; signing in later moves it to the account and takes the anonymous one down
+ipcMain.handle('recap-share', async (event, input) => {
+  const year = Number(input?.year);
+  if (!Number.isInteger(year)) return { success: false, error: 'No year.' };
+  const prev = await recapModule.getShare(year);
+  const res = await shareModule.shareRecap(getSettings, { payload: input.payload, card: input.card, prev: prev?.anonymous ? prev : null });
+  if (!res.success) {
+    logger.warn(`Recap share failed (${res.anonymous ? 'anonymous' : 'account'}): ${res.status || '-'} ${res.error}`);
+    return { success: false, status: res.status, error: res.error };
+  }
+  const d = res.data;
+  await recapModule.setShare(year, { id: d.id, url: d.url, deleteKey: d.deleteKey, anonymous: res.anonymous, sharedAt: new Date().toISOString() });
+  if (prev?.anonymous && !res.anonymous && prev.id !== d.id) {
+    void shareModule.unshareRecap(getSettings, prev).catch(() => {});
+  }
+  return { success: true, url: d.url, anonymous: res.anonymous };
+});
+ipcMain.handle('recap-share-state', async (event, year) => {
+  const s = await recapModule.getShare(year);
+  return s ? { url: s.url, anonymous: Boolean(s.anonymous) } : null;
+});
+ipcMain.handle('recap-unshare', async (event, year) => {
+  const s = await recapModule.getShare(year);
+  if (!s) return { success: true };
+  const res = await shareModule.unshareRecap(getSettings, s);
+  if (res.success) await recapModule.setShare(year, null);
+  return res;
+});
+// only ever the link this app made for that year
+ipcMain.handle('recap-open-share', async (event, year) => {
+  const s = await recapModule.getShare(year);
+  if (s?.url && /^https:\/\/setsu\.gg\/r\//.test(s.url)) await shell.openExternal(s.url);
+});
+ipcMain.handle('save-recap-mix', (event, mix) => recapModule.saveMix(mix));
 
 ipcMain.handle('search-games', (event, query, libraryGames) =>
   gamesModule.searchGames(query, libraryGames, (items) => clipdipModule.resolveGames(items)));

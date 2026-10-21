@@ -10,6 +10,7 @@ import RailProfile from "./RailProfile";
 import RailSearch from "./RailSearch";
 import SettingsRail from "./SettingsRail";
 import UpdatePill from "./UpdatePill";
+import RecapPill from "./RecapPill";
 import AnalysisPill from "./AnalysisPill";
 import FeedRailFilters from "../feed/FeedRailFilters";
 import type { UseLibraryFilter } from "../library/useLibraryFilter";
@@ -134,6 +135,7 @@ function Sidebar({
                   key={id}
                   type="button"
                   data-rail-tip={tip}
+                  data-nav={id}
                   className={`rail-item${active ? " active" : ""}${locked ? " soon" : ""}`}
                   onClick={() => {
                     if (disabled) toast.show(`${label} is coming soon`);
@@ -207,6 +209,8 @@ function Sidebar({
         </>
       )}
 
+      {/* only renders once __recap() turned it on; after the recap was seen, only in settings */}
+      <RecapPill inSettings={route === "settings"} />
       {/* only renders while an update is available or in flight */}
       <UpdatePill />
       {/* only renders during the one-time library listen */}

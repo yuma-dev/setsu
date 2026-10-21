@@ -542,6 +542,82 @@ export interface GameSearchResult {
   steam_appid: string | null;
 }
 
+/** a game in the recap: Discord art, the exe icon clipdip saved as the fallback */
+export interface RecapGameRef {
+  name: string;
+  icon: string | null;
+  iconPath: string | null;
+}
+
+export interface RecapFriend {
+  id: string;
+  name: string;
+  user: string;
+  clips: number;
+  /** day of year of the first clip together */
+  first: number;
+  games: Array<RecapGameRef & { n: number }>;
+  av: string | null;
+  color: string;
+}
+
+/** days are 0-based days of the recap year */
+export interface RecapData {
+  year: number;
+  /** last day covered, "Oct 19" */
+  through: string;
+  fps: number;
+  /** whoever the recorder sees in nearly every voice clip, null without voice data */
+  owner: { id: string; name: string; handle: string; avatar: string | null } | null;
+  clips: {
+    count: number;
+    seconds: number;
+    bytes: number;
+    named: number;
+    trimmed: number;
+    activeDays: number;
+    streak: { a: number; b: number; len: number } | null;
+    /** latest clip of a night, "04:57" */
+    latest: { t: string; day: number } | null;
+  };
+  byHour: number[];
+  /** the top games, each with its own colour */
+  games: Array<RecapGameRef & { color: string }>;
+  /** [day, hour 6-30 (after midnight counts to the night before), game (index, -1 none, 99 other), seconds, friends in voice] */
+  pts: Array<[number, number, number, number, number]>;
+  friends: RecapFriend[];
+  /** clips two friends share, keyed "idA-idB" */
+  pairs: Record<string, number>;
+  /** first clip with voice participants */
+  voiceDay: number | null;
+  /** s/e: average kept range as a share of the clip; surv: share of trimmed clips keeping each 60th */
+  trims: { n: number; s: number; e: number; surv: number[] };
+  act: Record<string, number>;
+  exports: Record<string, number>;
+  speeds: Record<string, number>;
+  watch: {
+    sessions: number;
+    seconds: number;
+    /** the clip watched for real (10 s or more) the most times; sessions counts those watches */
+    top: RecapWatchTop | null;
+  };
+  longestTitle: string | null;
+}
+
+export interface RecapWatchTop {
+  file: string;
+  title: string;
+  sessions: number;
+  seconds: number;
+  video: string;
+  poster: string | null;
+  game: string | null;
+  date: string;
+  start: number;
+  end: number;
+  speed: number;
+}
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export interface ClipsApi {
   getClips(): Promise<any[]>;
@@ -592,6 +668,21 @@ export interface ClipsApi {
   setClipGame(clipNames: string[], game: GameSearchResult | null): Promise<{ written: number }>;
   /** null when a pass was already running */
   runGameBackfill(): Promise<{ tagged: number; without: number } | { error: string } | null>;
+
+  getRecap(year: number): Promise<RecapData>;
+  /** https urls and file paths to data urls, null where one failed */
+  recapInlineImages(srcs: string[]): Promise<Record<string, string | null>>;
+  /** card is the exported png as a data url; works signed out too, as an anonymous share */
+  shareRecap(input: { year: number; payload: unknown; card: string }): Promise<{ success: boolean; url?: string; anonymous?: boolean; status?: number; error?: string }>;
+  recapShareState(year: number): Promise<{ url: string; anonymous: boolean } | null>;
+  unshareRecap(year: number): Promise<{ success: boolean; status?: number; error?: string }>;
+  openRecapShare(year: number): Promise<void>;
+  saveRecapCard(pngDataUrl: string, fileName: string): Promise<{ saved: boolean; path?: string }>;
+  copyRecapCard(pngDataUrl: string): Promise<boolean>;
+  /** the recap's dev mixer levels, null until saved once */
+  loadRecapMix(): Promise<unknown>;
+  /** writes recap-mix.json to userData, resolves with its path */
+  saveRecapMix(mix: unknown): Promise<string>;
 
   saveCustomName(originalName: string, customName: string): Promise<{ success: boolean; customName?: string; error?: string }>;
   getClipInfo(clip: any): Promise<any>;
