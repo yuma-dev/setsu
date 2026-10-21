@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const electron = createRequire(import.meta.url)('electron');
 const launcher = path.join(root, 'clipdip', 'target', 'release', 'cliplib-launcher.exe');
+const splash = path.join(root, 'clipdip', 'crates', 'launcher', 'splash.bin');
 // in dev the launcher waits for electron, so a quick exit means it never started it: a launcher
 // built from older code (a release build of a commit without dev mode) looks for ClipLib.exe
 // next to itself and quits
@@ -22,7 +23,7 @@ const plain = () => {
 if (!fs.existsSync(launcher)) plain();
 else {
   const started = Date.now();
-  const child = spawn(launcher, [], { stdio: 'inherit', env: { ...process.env, CLIPLIB_DEV_APP: electron, CLIPLIB_DEV_APP_DIR: root } });
+  const child = spawn(launcher, [], { stdio: 'inherit', env: { ...process.env, CLIPLIB_DEV_APP: electron, CLIPLIB_DEV_APP_DIR: root, CLIPLIB_DEV_SPLASH: splash } });
   child.on('exit', (code) => {
     if (Date.now() - started > STALE_MS) process.exit(code ?? 0);
     console.log('launcher quit without starting the app (stale build? npm run build:launcher), starting electron without the splash');

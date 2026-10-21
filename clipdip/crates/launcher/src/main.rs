@@ -7,6 +7,8 @@
 #![windows_subsystem = "windows"]
 
 use std::env;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -35,9 +37,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 // ClipLib.exe: an old launcher left next to a new app or the other way round mid update
 const APP_EXES: [&str; 2] = ["Setsu.exe", "ClipLib.exe"];
-// baked by scripts/bake-splash.mjs from the setsu web component, format documented there.
-// empty when it was not baked, then there is no splash
-const SPLASH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/splash.bin"));
+// baked by scripts/bake-splash.mjs from the setsu web component, format documented there; no file,
+// no splash. not in the exe: 10 MB of zlib inside a small unsigned exe that starts another one got
+// 3.8.0's launcher quarantined as Trojan:Win32/Bearfoos.A!ml
+const SPLASH_FILE: &str = "resources/launcher-splash.bin";
 
 // short: the app draws the same mark at the same spot once opaque and animates from there
 const FADE_OUT: Duration = Duration::from_millis(120);
@@ -55,6 +58,11 @@ fn u32_at(b: &[u8], at: usize) -> usize {
 /// One scale's frames, each a delta against the frame before. The last one takes the picture
 /// back to frame `hold`, so the loop goes on at `hold + 1` with deltas only.
 struct Splash {
+    file: File,
+    // where this scale's frames sit in the file; read after the app is started
+    at: u64,
+    len: usize,
+    data: Vec<u8>,
     scale: f32,
     win_w: i32,
     win_h: i32,
@@ -65,20 +73,28 @@ struct Splash {
     hold_ms: u64,
     loop_ms: u64,
     blink_ms: (u64, u64),
-    // known once reached, frames are walked in order the first time round
+    // known once reached, frames are walked in order the first time round; into `data`
     offsets: Vec<Option<usize>>,
 }
 
 impl Splash {
-    /// largest baked scale not above the system's, else the smallest
-    fn load(system_scale: f32) -> Option<Splash> {
-        let b = SPLASH;
-        if b.len() < 32 || &b[0..4] != b"STSU" || u16_at(b, 4) != 1 {
+    /// the header only, enough to place the window; largest baked scale not above the system's,
+    /// else the smallest
+    fn load(path: PathBuf, system_scale: f32) -> Option<Splash> {
+        let mut file = File::open(path).ok()?;
+        let size = file.metadata().ok()?.len() as usize;
+        let mut b = vec![0u8; 32];
+        file.read_exact(&mut b).ok()?;
+        if &b[0..4] != b"STSU" || u16_at(&b, 4) != 1 {
             return None;
         }
+        let sets = u16_at(&b, 28);
+        b.resize(32 + sets * 8, 0);
+        file.read_exact(&mut b[32..]).ok()?;
+        let b = &b[..];
         let fits = |s: f32| s <= system_scale + 0.01;
         let mut pick: Option<(f32, usize)> = None;
-        for k in 0..u16_at(b, 28) {
+        for k in 0..sets {
             let scale = u16_at(b, 32 + k * 8) as f32 / 100.0;
             let offset = u32_at(b, 32 + k * 8 + 4);
             let better = match pick {
@@ -91,15 +107,21 @@ impl Splash {
             }
         }
         let (scale, offset) = pick?;
+        // sets are stored one after the other, this one ends where the next starts
+        let end = (0..sets).map(|k| u32_at(b, 32 + k * 8 + 4)).filter(|&o| o > offset).min().unwrap_or(size);
         let (fps, frames) = (u16_at(b, 16) as u64, u16_at(b, 18));
         let (hold_ms, loop_ms) = (u16_at(b, 20) as u64, u16_at(b, 22) as u64);
         let hold = (hold_ms * fps / 1000) as usize;
-        if fps == 0 || loop_ms == 0 || hold + 1 >= frames || offset >= b.len() {
+        if fps == 0 || loop_ms == 0 || hold + 1 >= frames || offset >= end || end > size {
             return None;
         }
         let mut offsets = vec![None; frames];
-        offsets[0] = Some(offset);
+        offsets[0] = Some(0);
         Some(Splash {
+            file,
+            at: offset as u64,
+            len: end - offset,
+            data: Vec::new(),
             scale,
             win_w: (u16_at(b, 6) as f32 * scale).round() as i32,
             win_h: (u16_at(b, 8) as f32 * scale).round() as i32,
@@ -111,6 +133,15 @@ impl Splash {
             blink_ms: (u16_at(b, 24) as u64 * loop_ms / 1000, u16_at(b, 26) as u64 * loop_ms / 1000),
             offsets,
         })
+    }
+
+    fn read_frames(&mut self) -> bool {
+        let mut data = vec![0u8; self.len];
+        if self.file.seek(SeekFrom::Start(self.at)).is_err() || self.file.read_exact(&mut data).is_err() {
+            return false;
+        }
+        self.data = data;
+        true
     }
 
     /// stored frame for the `step`th one played
@@ -126,7 +157,7 @@ impl Splash {
     /// adds frame `i`'s delta onto the canvas; false on a broken file
     fn apply(&mut self, i: usize, canvas: &mut Canvas) -> bool {
         let Some(at) = self.offsets.get(i).copied().flatten() else { return false };
-        let b = SPLASH;
+        let b = &self.data;
         let (x, y, w, h) = (u16_at(b, at), u16_at(b, at + 2), u16_at(b, at + 4), u16_at(b, at + 6));
         let end = at + 12 + u32_at(b, at + 8);
         if end > b.len() {
@@ -205,9 +236,18 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
-// npm run dev: CLIPLIB_DEV_APP is the electron binary, CLIPLIB_DEV_APP_DIR the project it runs
+// npm run dev: CLIPLIB_DEV_APP is the electron binary, CLIPLIB_DEV_APP_DIR the project it runs,
+// CLIPLIB_DEV_SPLASH the baked splash in the crate
 const DEV_APP: &str = "CLIPLIB_DEV_APP";
 const DEV_APP_DIR: &str = "CLIPLIB_DEV_APP_DIR";
+const DEV_SPLASH: &str = "CLIPLIB_DEV_SPLASH";
+
+fn splash_path() -> Option<PathBuf> {
+    if let Some(dev) = env::var_os(DEV_SPLASH) {
+        return Some(PathBuf::from(dev));
+    }
+    Some(env::current_exe().ok()?.parent()?.join(SPLASH_FILE))
+}
 
 fn app_exe_path() -> Option<PathBuf> {
     if let Some(dev) = env::var_os(DEV_APP) {
@@ -281,7 +321,7 @@ fn app_window_visible(pid: u32) -> bool {
 }
 
 fn main() {
-    // splash must never delay the app; only geometry is computed before spawn
+    // splash must never delay the app; only the header is read before spawn
     let Some(app) = app_exe_path() else {
         report_launch_failure("Setsu.exe is missing next to the launcher");
         return;
@@ -289,7 +329,7 @@ fn main() {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
-    let mut splash = Splash::load(unsafe { GetDpiForSystem() } as f32 / 96.0);
+    let mut splash = splash_path().and_then(|path| Splash::load(path, unsafe { GetDpiForSystem() } as f32 / 96.0));
     let mut work = RECT::default();
     unsafe {
         let _ = SystemParametersInfoW(
@@ -332,7 +372,9 @@ fn main() {
         }
     };
     if let Some(splash) = splash.as_mut() {
-        play(splash, &mut child, started, (x, y, width, height));
+        if splash.read_frames() {
+            play(splash, &mut child, started, (x, y, width, height));
+        }
     }
     // dev runner (concurrently) treats our exit as the app quitting
     if dev {
