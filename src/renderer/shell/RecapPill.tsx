@@ -278,8 +278,8 @@ function flyToSettings(pill: HTMLElement, done: () => void): void {
   requestAnimationFrame(step);
 }
 
-// sits above the update pill; only there once __recap() turned it on and the year has enough to
-// recap. after the recap was seen through it flies into settings once and from then on only shows
+// sits above the update pill; only there from the recap's release time (or __recap()) and when the
+// year has enough to recap. after the recap was seen through it flies into settings once and from then on only shows
 // in the settings rail
 function RecapPill({ inSettings }: { inSettings: boolean }) {
   const { enabled: on, year, open, finished, docked, flyNow, eligible, force } = useRecap();

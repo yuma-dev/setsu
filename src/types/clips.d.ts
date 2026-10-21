@@ -564,6 +564,8 @@ export interface RecapFriend {
 /** days are 0-based days of the recap year */
 export interface RecapData {
   year: number;
+  /** first day covered, "2025-10-21"; day numbers count from it. missing means Jan 1 of year */
+  from?: string;
   /** last day covered, "Oct 19" */
   through: string;
   fps: number;

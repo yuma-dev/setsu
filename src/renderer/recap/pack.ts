@@ -5,7 +5,7 @@
 // three.js draws it into two canvases, one behind and one in front of the dom card, so the real
 // card slides out between the pouch's back and front. coordinates are stage px (1920x1080, y down)
 import * as THREE from "three";
-import { DISPLAY, MONO, cl, eo, eob } from "./model";
+import { DISPLAY, MONO, cl, eio, eo, eob } from "./model";
 // the pack's saying in Shippori Mincho B1 (OFL, license next to it), cut down to its six glyphs by
 // Google Fonts' text= subsetting: 3 KB where the whole font would be megabytes
 import minchoUrl from "../assets/fonts/setsuna-mincho.woff2?url";
@@ -30,6 +30,9 @@ const ROW = 6;
 const LIP = 44;
 // a torn lid bends over this much of its height, the rest stays a flat flap
 const BEND = 30;
+// the entrance takes this long, in s, and lands this far through
+const ENTER = 1.7;
+const LAND = 0.78;
 // pack centre on the stage
 const CX = 960;
 const CY = 522;
@@ -50,7 +53,8 @@ export interface PackEvents {
   phase(p: PackPhase): void;
   /** fired once the pouch has dropped away and the card stands on its own */
   done(): void;
-  sound(name: "rip" | "cardOut" | "shine"): void;
+  /** land: the entrance spin settles, the moment for the chime and the burst */
+  sound(name: "rip" | "cardOut" | "shine" | "land" | "hop" | "hopLand"): void;
   /** the cut moved, progress 0..1 up to where the line counts as complete */
   cut(progress: number): void;
 }
@@ -647,6 +651,10 @@ export class PackScene {
   private rimB!: THREE.Mesh<THREE.BufferGeometry, THREE.ShaderMaterial>;
   private inner!: THREE.Sprite;
   private key = new THREE.DirectionalLight(0xffffff, 0.9);
+  /** the printed outside films, flared by the landing light */
+  private films: THREE.MeshPhysicalMaterial[] = [];
+  /** when the entrance landed, for the light that sweeps over the pack then */
+  private landAt = 0;
   private disposables: Array<{ dispose(): void }> = [];
 
   // the torn path, px off the printed line per sample, and the same packed into a texture
@@ -675,7 +683,13 @@ export class PackScene {
   private lidVel = new THREE.Vector3();
   private lidSpin = new THREE.Vector3();
   private sounded = new Set<string>();
-  private placed = { peel: NaN, open: NaN, head: NaN, flutter: NaN };
+  private placed = { peel: NaN, open: NaN, head: NaN, flutter: NaN, dent: false };
+  /** presses on the closed pack, in pack px with the time they landed: each dents the film and it
+   * springs back */
+  private pokes: Array<{ x: number; y: number; t0: number }> = [];
+  // poked six times in two seconds it has had enough: a hop with a full turn in the air
+  private pokeTimes: number[] = [];
+  private hopT0 = 0;
   private dead = false;
   private v = new THREE.Vector3();
   private w = new THREE.Vector3();
@@ -721,6 +735,11 @@ export class PackScene {
     this.disposables.push(this.pathTex);
   }
 
+  private film(m: THREE.MeshPhysicalMaterial): THREE.MeshPhysicalMaterial {
+    this.films.push(m);
+    return m;
+  }
+
   /** textures and meshes; the constructor already threw if there's no webgl */
   async init(year: number, corners: string, star: string, scale: number): Promise<void> {
     const art = await drawArt(year, corners, star);
@@ -764,7 +783,7 @@ export class PackScene {
     // print all over only mirrored the dark room and read as near black
     const outer = (map: THREE.Texture, foil: THREE.Texture | null, lid: boolean, side: THREE.Side) =>
       cut(
-        new THREE.MeshPhysicalMaterial({
+        this.film(new THREE.MeshPhysicalMaterial({
           map,
           alphaMap,
           alphaTest: 0.5,
@@ -782,7 +801,7 @@ export class PackScene {
           clearcoatRoughness: 0.035,
           envMapIntensity: 1,
           side,
-        }),
+        })),
         lid,
       );
     // the inside is bare silver film, crumpled a bit harder
@@ -973,6 +992,34 @@ export class PackScene {
     }
   }
 
+  /** a press that didn't start a cut: the film dents under it and wobbles back */
+  poke(x: number, y: number): void {
+    if (this.phase !== "idle") return;
+    const [lx, ly] = this.local(x, y);
+    if (Math.abs(lx) > W / 2 || ly < 0 || ly > H) return;
+    this.pokes.push({ x: lx, y: ly, t0: this.now });
+    if (this.pokes.length > 4) this.pokes.shift();
+    this.pokeTimes = [...this.pokeTimes.filter((t) => this.now - t < 2000), this.now];
+    if (this.pokeTimes.length >= 6 && !this.hopT0) {
+      this.pokeTimes = [];
+      this.hopT0 = this.now;
+      this.ev.sound("hop");
+    }
+  }
+
+  /** how deep the presses push the film in at a pack point: a dimple that springs back with a few
+   * shrinking wobbles */
+  private dent(x: number, y: number): number {
+    let d = 0;
+    for (const p of this.pokes) {
+      const age = (this.now - p.t0) / 1000;
+      const dx = x - p.x;
+      const dy = y - p.y;
+      d += 16 * Math.exp(-age / 0.2) * Math.cos(2 * Math.PI * 4.2 * age) * Math.exp(-(dx * dx + dy * dy) / (2 * 75 * 75));
+    }
+    return d;
+  }
+
   up(): void {
     if (!this.tracing) return;
     this.tracing = false;
@@ -1051,9 +1098,14 @@ export class PackScene {
   /** puts surfaces where the fold, the tear and the opening say, only when one of them changed */
   private place(): void {
     const P = this.placed;
-    const lidMoved = this.pathDirty || P.peel !== this.peel || P.head !== this.head || P.flutter !== this.flutter;
+    this.pokes = this.pokes.filter((p) => this.now - p.t0 < 900);
+    // a dent moves everything while it lasts, and once more as it ends so the film is smooth again
+    const denting = this.pokes.length > 0;
+    const redent = denting || P.dent;
+    P.dent = denting;
+    const lidMoved = redent || this.pathDirty || P.peel !== this.peel || P.head !== this.head || P.flutter !== this.flutter;
     // the closed body never changes, it only moves once the mouth opens
-    const bodyMoved = P.open !== this.open || (this.open > 0 && this.pathDirty);
+    const bodyMoved = redent || P.open !== this.open || (this.open > 0 && this.pathDirty);
     if (!lidMoved && !bodyMoved) return;
     P.peel = this.peel;
     P.head = this.head;
@@ -1068,6 +1120,8 @@ export class PackScene {
       const p = s.geo.attributes.position as THREE.BufferAttribute;
       for (let i = 0; i < p.count; i++) {
         at(s.base[i * 2], s.base[i * 2 + 1], s.side, v);
+        // the front gives under the press, the back bulges a little with the air pushed into it
+        if (denting) v.z -= this.dent(s.base[i * 2], s.base[i * 2 + 1]) * (s.side > 0 ? 1 : 0.3);
         p.setXYZ(i, v.x, v.y, v.z);
       }
       p.needsUpdate = true;
@@ -1115,11 +1169,20 @@ export class PackScene {
     let exposure: number;
     this.tip = null;
 
+    // the entrance: up out of the dark spinning two whole turns, growing past its size as the spin
+    // runs out and settling back, with a flash of light and the rays as it lands
+    let land = 0;
     if (this.phase === "enter") {
-      const p = cl(t / 0.85);
-      scale = 0.42 + 0.58 * eob(p);
-      lift = (1 - eo(p)) * 160;
-      spin = (1 - eo(p)) * 0.55;
+      const p = cl(t / ENTER);
+      scale = 0.1 + 0.9 * eob(cl(p / 0.82));
+      lift = (1 - eo(p)) * 300;
+      spin = Math.pow(1 - p, 5) * Math.PI * 4;
+      if (p >= LAND && !this.sounded.has("land")) {
+        this.sounded.add("land");
+        this.landAt = now;
+        this.ev.sound("land");
+      }
+      land = p >= LAND ? 1 - cl((p - LAND) / (1 - LAND)) * 0.4 : 0;
       if (p >= 1) this.to("idle");
     }
     // a spark runs along the printed line every couple of seconds until someone starts
@@ -1218,6 +1281,16 @@ export class PackScene {
         }
       }
     }
+    if (this.phase === "enter" || this.phase === "idle") {
+      if (land > 0) {
+        this.rays = Math.max(this.rays, 0.85 * land);
+        this.flash = Math.max(this.flash, 0.18 * land * land);
+        exposure *= 1 + 0.35 * land;
+      } else {
+        this.rays = Math.max(0, this.rays - dt * 0.55);
+        this.flash = Math.max(0, this.flash - dt * 1.4);
+      }
+    }
     if (this.phase === "done") {
       this.rays = Math.max(0, this.rays - dt * 0.8);
       this.cardLift = 0;
@@ -1230,12 +1303,46 @@ export class PackScene {
     // float, tilt toward the pointer, shiver while armed
     const float = this.phase === "rip" || this.phase === "done" ? 0 : Math.sin((now / 1000) * 1.3) * 6;
     const k = tracing ? 0.25 : this.phase === "rip" ? 0 : 1;
-    this.tilt.rotation.y += ((tx - 0.5) * 0.42 * k + spin - this.tilt.rotation.y) * 0.12;
+    // the entrance spin is set outright, eased toward it would lag a whole turn behind
+    const hq = this.hopT0 ? (now - this.hopT0) / 1100 : -1;
+    // the hop: up, stretched in the air, and down
+    const hop = hq >= 0 && hq < 1 ? Math.sin(Math.PI * hq) : 0;
+    if (this.phase === "enter") this.tilt.rotation.y = spin + (tx - 0.5) * 0.42 * (1 - spin / (Math.PI * 4));
+    else if (hq >= 0 && hq < 1) this.tilt.rotation.y = Math.PI * 2 * eio(hq) + (tx - 0.5) * 0.42;
+    else this.tilt.rotation.y += ((tx - 0.5) * 0.42 * k + spin - this.tilt.rotation.y) * 0.12;
+    if (hq >= 1) {
+      // a whole turn is no turn: unwound so the pointer tilt doesn't spin it back
+      this.hopT0 = 0;
+      this.tilt.rotation.y -= Math.PI * 2;
+      this.ev.sound("hopLand");
+    }
     this.tilt.rotation.x += (-(ty - 0.5) * 0.3 * k + lean - this.tilt.rotation.x) * 0.12;
     this.root.scale.setScalar(scale * (1 + (tracing ? 0.025 * (this.b - this.a) : 0)));
-    this.root.position.set(CX - 960 + (Math.random() - 0.5) * shake, 540 - CY + lift + float + this.recoil, 0);
+    // a press squashes the whole pack a touch, wider and shorter, and it wobbles back with the dent
+    if (hop) {
+      this.root.scale.x *= 1 - 0.05 * hop;
+      this.root.scale.y *= 1 + 0.07 * hop;
+    }
+    const last = this.pokes[this.pokes.length - 1];
+    if (last) {
+      const age = (now - last.t0) / 1000;
+      const w = Math.exp(-age / 0.18) * Math.cos(2 * Math.PI * 3.6 * age);
+      this.root.scale.x *= 1 + 0.018 * w;
+      this.root.scale.y *= 1 - 0.026 * w;
+    }
+    this.root.position.set(CX - 960 + (Math.random() - 0.5) * shake, 540 - CY + lift + float + this.recoil + 190 * hop, 0);
     // the key light follows the pointer so glints slide across the film
     this.key.position.set((tx - 0.5) * 1400, (0.5 - ty) * 900 + 300, 900);
+    const sw = this.landAt ? (now - this.landAt) / 750 : 1;
+    if (sw < 1) {
+      const bell = Math.pow(Math.sin(Math.PI * sw), 1.4);
+      this.key.position.set(-1700 + 3400 * sw, 1100 - 1900 * sw, 900);
+      this.key.intensity = 0.9 + 3.4 * bell;
+      for (const m of this.films) m.envMapIntensity = 1 + 1.6 * bell;
+    } else if (this.key.intensity !== 0.9) {
+      this.key.intensity = 0.9;
+      for (const m of this.films) m.envMapIntensity = 1;
+    }
     this.place();
     this.outline = null;
     if (this.cardVis && this.phase === "rip") {

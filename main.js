@@ -2164,7 +2164,12 @@ ipcMain.handle('recap-share', async (event, input) => {
   const year = Number(input?.year);
   if (!Number.isInteger(year)) return { success: false, error: 'No year.' };
   const prev = await recapModule.getShare(year);
-  const res = await shareModule.shareRecap(getSettings, { payload: input.payload, card: input.card, prev: prev?.anonymous ? prev : null });
+  let res = await shareModule.shareRecap(getSettings, { payload: input.payload, card: input.card, prev: prev?.anonymous ? prev : null });
+  // the stored key no longer matches (taken down, or replaced from another install): a new link
+  // beats a share that can never go up again
+  if (!res.success && prev?.anonymous && (res.status === 403 || res.status === 404)) {
+    res = await shareModule.shareRecap(getSettings, { payload: input.payload, card: input.card, prev: null });
+  }
   if (!res.success) {
     logger.warn(`Recap share failed (${res.anonymous ? 'anonymous' : 'account'}): ${res.status || '-'} ${res.error}`);
     return { success: false, status: res.status, error: res.error };

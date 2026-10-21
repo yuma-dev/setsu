@@ -101,6 +101,10 @@ interface State {
   crew: boolean;
   /** "click the card" shows once the card has sat unflipped a while, and never after the first click */
   flipHint: boolean;
+  /** how many chart stars are traced in order so far, all of them lights the constellation */
+  lit: number;
+  /** the chart star under the pointer, -1 for none */
+  hot: number;
 }
 
 interface Props {
@@ -225,6 +229,58 @@ const CHART: Array<[number, number]> = [
 const starHz = (i: number) => 1318.5 * Math.pow(2, (12 * Math.floor(i / 5) + [0, 2, 4, 7, 9][i % 5]) / 12);
 const CHART_T0 = 0.55;
 const CHART_DT = 0.26;
+type Side = "b" | "br" | "bl" | "t" | "r" | "l";
+/** where each chart star's label goes: under it unless a line runs through there, else hanging off
+ * to one side, above, right or left, wherever it covers no line, star or other label. sizes are
+ * guesses from the text length */
+function chartSides(stats: Stat[]): Side[] {
+  const pts = CHART.slice(0, stats.length);
+  const boxes: number[][] = [];
+  const inside = (b: number[], x: number, y: number, m: number) => x > b[0] - m && x < b[2] + m && y > b[1] - m && y < b[3] + m;
+  return stats.map((st, i) => {
+    const [x, y] = pts[i];
+    const big = i === 0;
+    const w = Math.max(st.v.length * (big ? 35 : 25), st.l.length * 11, st.n.length * 7.6);
+    const h = (big ? 67 : 53) + (st.n ? 25 : 0);
+    // same offsets as .rc-node-lab and its sides in recap.css
+    const gap = big ? 32 : 24;
+    const mid = big ? 24 : 17;
+    const at: Record<Side, number[]> = {
+      b: [x - w / 2, y + gap, x + w / 2, y + gap + h],
+      t: [x - w / 2, y - gap - h, x + w / 2, y - gap],
+      r: [x + gap + 4, y - mid, x + gap + 4 + w, y - mid + h],
+      l: [x - gap - 4 - w, y - mid, x - gap - 4, y - mid + h],
+      br: [x - 20, y + gap, x - 20 + w, y + gap + h],
+      bl: [x + 20 - w, y + gap, x + 20, y + gap + h],
+    };
+    let best: Side = "b";
+    let low = Infinity;
+    (["b", "br", "bl", "t", "r", "l"] as const).forEach((s, k) => {
+      const b = at[s];
+      let bad = k * 0.5;
+      for (let j = 1; j < pts.length; j++) {
+        const [x1, y1] = pts[j - 1];
+        const [x2, y2] = pts[j];
+        for (let q = 0; q <= 1; q += 1 / 48) {
+          if (inside(b, x1 + (x2 - x1) * q, y1 + (y2 - y1) * q, 6)) {
+            bad += 4;
+            break;
+          }
+        }
+      }
+      for (let j = 0; j < pts.length; j++) if (j !== i && inside(b, pts[j][0], pts[j][1], 26)) bad += 4;
+      for (const o of boxes) if (b[0] < o[2] + 16 && o[0] < b[2] + 16 && b[1] < o[3] + 16 && o[1] < b[3] + 16) bad += 6;
+      // the copy block sits top left, the chrome along the bottom
+      if (b[0] < 730 || b[2] > 1880 || b[1] < 60 || b[3] > 1000) bad += 6;
+      if (bad < low) {
+        low = bad;
+        best = s;
+      }
+    });
+    boxes.push(at[best]);
+    return best;
+  });
+}
 // faint stars around the chart that belong to no line
 const CHART_DUST = Array.from({ length: 26 }, (_, i) => [760 + ((i * 397) % 1060), 130 + ((i * 251) % 800), 0.25 + ((i * 7) % 5) / 10] as const);
 const TIER: Record<Tier, string> = { spot: "Spot on", close: "So close", near: "Not far", off: "Way off" };
@@ -275,6 +331,8 @@ export default class Recap extends Component<Props, State> {
     sharing: false,
     crew: false,
     flipHint: false,
+    lit: 0,
+    hot: -1,
   };
 
   rootRef = createRef<HTMLDivElement>();
@@ -361,6 +419,14 @@ export default class Recap extends Component<Props, State> {
   prevH = 0;
   /** when a right answer lands, the sky blooms */
   pulseAt = 0;
+  // easter eggs: the card flipped five times in a moment spins, a shooting star can be caught, the
+  // konami code throws the sky into hyperspace, the star chart lights up when traced in order
+  flips: number[] = [];
+  spinT0 = 0;
+  shootPos: { x: number; y: number; ex: number; ey: number } | null = null;
+  caught: Array<{ x: number; y: number; t0: number }> = [];
+  kpos = 0;
+  warpT0 = 0;
   hinted = false;
   tiltT = 0;
   tiltX = 0.5;
@@ -374,6 +440,8 @@ export default class Recap extends Component<Props, State> {
   lastTip: { x: number; y: number } | null = null;
   lastFlash = 0;
   sparks: Spark[] = [];
+  /** four point glints that pop on the pack as it lands: they grow, turn and fade where they are */
+  glints: Array<{ x: number; y: number; t0: number; life: number; r: number; rot: number }> = [];
   artDone = false;
 
   raf = 0;
@@ -461,7 +529,27 @@ export default class Recap extends Component<Props, State> {
     if (e.key === "Escape") {
       e.preventDefault();
       this.close();
-    } else if (e.key === "m" || e.key === "M") {
+      return;
+    }
+    // up up down down left right left right b a: the arrows mid-code don't change chapters
+    const KONAMI = ["ArrowUp", "ArrowUp", "ArrowDown", "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowLeft", "ArrowRight", "b", "a"];
+    const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    if (key === KONAMI[this.kpos]) {
+      this.kpos++;
+      if (this.kpos === KONAMI.length) {
+        this.kpos = 0;
+        this.warpT0 = performance.now();
+        au.play("immersive-start", { gain: 0.8 });
+        au.play("riser-1", { at: 0.1, gain: 0.7 });
+        au.play("stinger-star", { at: 2.4, gain: 0.5 });
+        return;
+      }
+      if (this.kpos > 4) {
+        e.preventDefault();
+        return;
+      }
+    } else this.kpos = key === KONAMI[0] ? 1 : 0;
+    if (e.key === "m" || e.key === "M") {
       this.toggleSound();
     } else if ((e.key === " " || e.key === "Enter") && onButton) {
       return;
@@ -770,6 +858,7 @@ export default class Recap extends Component<Props, State> {
     if (key === "card") {
       this.cs0 = { x: 0.5, y: 0.5, o: 0.6, vx: 0, vy: 0, vo: 0, f: 180, vf: 0, ft: 180, hov: false, hx: 0.5, hy: 0.5, ph: "pack", ready: false, mix: 0 };
       this.sparks = [];
+      this.glints = [];
       this.artDone = false;
       this.revealed = false;
       this.lastTip = null;
@@ -933,14 +1022,35 @@ export default class Recap extends Component<Props, State> {
   introLeave = () => {
     this.mx = null;
   };
+  /** a click near a passing shooting star catches it */
+  rootDown = (e: RPointerEvent<HTMLDivElement>) => {
+    au.unlock();
+    const s = this.shootPos;
+    if (!s || !this.skyShoot) return;
+    const [x, y] = this.cPt(e);
+    // near its head or anywhere along its tail
+    const vx = s.ex - s.x;
+    const vy = s.ey - s.y;
+    const q = cl(((x - s.x) * vx + (y - s.y) * vy) / (vx * vx + vy * vy || 1));
+    if (Math.hypot(x - (s.x + vx * q), y - (s.y + vy * q)) > 55) return;
+    this.skyShoot = null;
+    this.shootPos = null;
+    this.caught.push({ x: s.x, y: s.y, t0: performance.now() });
+    au.play("stinger-star", { gain: 0.7 });
+    au.play("card-shine", { at: 0.05, gain: 0.5 });
+  };
+
   /** the sky leans away from the pointer on every page */
   rootMove = (e: RPointerEvent<HTMLDivElement>) => {
     const [x, y] = this.cPt(e);
     this.mx = x;
     this.my = y;
+    if (this.curKey() === "chart") this.chartMove(x, y);
+    else if (this.state.hot >= 0) this.setState({ hot: -1 });
   };
   rootLeave = () => {
     this.mx = null;
+    if (this.state.hot >= 0) this.setState({ hot: -1 });
   };
 
   // stack
@@ -1262,7 +1372,10 @@ export default class Recap extends Component<Props, State> {
     if (!this.pack || this.cs0?.ph !== "pack") return;
     const [x, y] = this.stagePt(e);
     if (this.pack.down(x, y)) e.currentTarget.setPointerCapture?.(e.pointerId);
-    else if (this.pack.phase === "idle") au.tap();
+    else if (this.pack.phase === "idle") {
+      au.tap();
+      this.pack.poke(x, y);
+    }
   };
   cardMove = (e: RPointerEvent<HTMLDivElement>) => {
     const c = this.cs0;
@@ -1289,7 +1402,11 @@ export default class Recap extends Component<Props, State> {
       const pack = new PackScene(b, f, {
         phase: (packPh) => {
           const was = this.state.packPh;
-          if (packPh === "enter") au.play("pack-in");
+          // the entrance: a whoosh as it rises, the spin's own sweep, the chime when it lands
+          if (packPh === "enter") {
+            au.play("pack-in");
+            au.play("rotate", { at: 0.12, gain: 0.55 });
+          }
           else if (packPh === "idle" && !this.hinted) {
             // the guide chimes once, with the first spark along the line
             this.hinted = true;
@@ -1318,6 +1435,28 @@ export default class Recap extends Component<Props, State> {
           } else if (n === "cardOut") {
             au.play("card-slide-rare", { gain: 0.85 });
             au.play("card-slide");
+          } else if (n === "hop") {
+            au.play("pack-select", { gain: 0.55 });
+            au.play("card-flick", { at: 0.08, gain: 0.6 });
+          } else if (n === "hopLand") {
+            au.tap();
+          } else if (n === "land") {
+            au.play("stinger-crown", { gain: 0.8 });
+            au.play("card-shine", { at: 0.04, gain: 0.45 });
+            // glints on its corners first, then along its edges, following the light across it
+            const t0 = performance.now();
+            const spots: Array<[number, number, number]> = [
+              [668, 100, 0],
+              [1252, 944, 380],
+              [1252, 100, 160],
+              [668, 944, 260],
+            ];
+            for (let i = 0; i < 8; i++) {
+              const u = Math.random();
+              const side = i % 4;
+              spots.push(side === 0 ? [668 + u * 584, 100, 80 + u * 300] : side === 1 ? [1252, 100 + u * 844, 120 + u * 340] : side === 2 ? [668 + u * 584, 944, 200 + u * 300] : [668, 100 + u * 844, 60 + u * 340]);
+            }
+            for (const [x, y, d] of spots) this.glints.push({ x, y, t0: t0 + d, life: 520 + Math.random() * 260, r: 14 + Math.random() * 16, rot: Math.random() * 0.6 });
           } else au.play("card-shine", { gain: 0.75 });
         },
         cut: (progress) => au.cut(progress),
@@ -1360,6 +1499,17 @@ export default class Recap extends Component<Props, State> {
       au.play("jingle-rare-e", { at: 0.2, duck: "jingle" });
       au.play(r >= 1 ? "stinger-crown" : r >= 0.5 ? "stinger-star" : "stinger-rhombus", { at: 0.35, gain: 0.7 });
     } else au.play("rotate-small");
+    // five flips in a moment: the card does three whole turns
+    const tn = performance.now();
+    this.flips = [...this.flips.filter((t) => tn - t < 2600), tn];
+    if (this.flips.length >= 5 && this.revealed && !this.spinT0) {
+      this.flips = [];
+      this.spinT0 = tn;
+      au.play("rotate", { gain: 0.8 });
+      au.play("card-shine", { at: 0.3, gain: 0.5 });
+      au.play("stinger-crown", { at: 1.25, gain: 0.7 });
+      for (const [x, y, d] of [[715, 150, 1250], [1205, 895, 1330], [1205, 150, 1410], [715, 895, 1490]] as const) this.glints.push({ x, y, t0: tn + d, life: 600, r: 22, rot: 0.3 });
+    }
     if (c.ft === 0) {
       this.revealed = true;
       // seen through: once the recap closes, its rail button flies into settings
@@ -1693,6 +1843,10 @@ export default class Recap extends Component<Props, State> {
     }
     // stars: the intro's warp in and out, then a slow drift, nearer ones faster
     const w = I ? (I.out ? eio(cl(I.ot / 0.85)) : Math.pow(1 - cl(I.t / 1.1), 2)) : 0;
+    // hyperspace: every star stretches out from the middle for a few seconds
+    const wq = this.warpT0 ? (now - this.warpT0) / 3000 : 1;
+    if (wq >= 1) this.warpT0 = 0;
+    const warp = wq < 1 ? Math.pow(Math.sin(Math.PI * wq), 1.3) : 0;
     const starA = I ? cl((I.t - 0.6) / 0.8) : back;
     for (const st of this.skyStars) {
       const dx0 = T * (2 + 8 * st.z);
@@ -1715,6 +1869,17 @@ export default class Recap extends Component<Props, State> {
         ctx.lineTo(x + dx * f, y + dy * f);
         ctx.stroke();
         if (I.out) continue;
+      }
+      if (warp > 0.01) {
+        const f = warp * (0.35 + st.z * 1.1);
+        ctx.globalAlpha = (0.35 + 0.65 * st.z) * Math.min(1, warp * 2);
+        ctx.strokeStyle = st.z > 0.7 ? "#ffe0ff" : "#fff";
+        ctx.lineWidth = r;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + (x - 960) * f, y + (y - 500) * f);
+        ctx.stroke();
+        continue;
       }
       if (x < x0 || x > x1 || y < y0 || y > y1) continue;
       const tw = 0.5 + 0.5 * Math.sin(T * (0.8 + st.z * 2.4) + st.ph);
@@ -1739,6 +1904,7 @@ export default class Recap extends Component<Props, State> {
         const y = sh.y + Math.sin(sh.a) * q * 700;
         const ex = x - Math.cos(sh.a) * 260;
         const ey = y - Math.sin(sh.a) * 260;
+        this.shootPos = { x, y, ex, ey };
         const g = ctx.createLinearGradient(x, y, ex, ey);
         g.addColorStop(0, "rgba(255,240,255,.9)");
         g.addColorStop(1, "rgba(255,240,255,0)");
@@ -1750,6 +1916,36 @@ export default class Recap extends Component<Props, State> {
         ctx.lineTo(ex, ey);
         ctx.stroke();
       }
+    } else this.shootPos = null;
+    // a caught shooting star: a ring of light, a glint, and a wish
+    for (let i = this.caught.length - 1; i >= 0; i--) {
+      const c = this.caught[i];
+      const q = (now - c.t0) / 1400;
+      if (q >= 1) {
+        this.caught.splice(i, 1);
+        continue;
+      }
+      ctx.globalAlpha = 1 - q;
+      ctx.strokeStyle = "#ffd6f7";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 10 + 110 * (1 - Math.pow(1 - q, 3)), 0, Math.PI * 2);
+      ctx.stroke();
+      const r = 26 * Math.sin(Math.PI * Math.min(1, q * 1.6));
+      ctx.fillStyle = "#fff";
+      ctx.globalAlpha = 1;
+      ctx.beginPath();
+      ctx.moveTo(c.x, c.y - r);
+      ctx.quadraticCurveTo(c.x, c.y, c.x + r, c.y);
+      ctx.quadraticCurveTo(c.x, c.y, c.x, c.y + r);
+      ctx.quadraticCurveTo(c.x, c.y, c.x - r, c.y);
+      ctx.quadraticCurveTo(c.x, c.y, c.x, c.y - r);
+      ctx.fill();
+      ctx.globalAlpha = Math.sin(Math.PI * q);
+      ctx.font = `500 15px ${MONO}`;
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#f3e8ff";
+      ctx.fillText("WISH MADE", c.x, c.y - 40 - 40 * q);
     }
     ctx.globalAlpha = 1;
   }
@@ -2755,7 +2951,7 @@ export default class Recap extends Component<Props, State> {
     }
     if (DM) DM.style.opacity = ((P ? P.dim : 0) * 0.62).toFixed(3);
     if (FL) FL.style.opacity = (P ? Math.pow(P.flash, 1.6) * 0.85 : 0).toFixed(3);
-    if (FLL) FLL.style.opacity = (P ? P.flash : 0).toFixed(3);
+    if (FLL) FLL.style.opacity = (P && P.phase === "rip" ? P.flash : 0).toFixed(3);
     if (c.ready) sp("f", c.ft, 0.06, 0.78);
     if (TL) TL.style.transform = `translate3d(0,${bob.toFixed(2)}px,0) rotateX(${rX.toFixed(2)}deg) rotateY(${rY.toFixed(2)}deg)`;
     if (CR) {
@@ -2770,7 +2966,19 @@ export default class Recap extends Component<Props, State> {
         CR.style.clipPath = `polygon(-600px -3000px, 1200px -3000px, 1200px ${top(5)}px, ${p(5)}, ${p(4)}, ${p(3)}, ${p(2)}, ${p(1)}, ${p(0)}, -600px ${top(0)}px)`;
       } else if (CR.style.clipPath) CR.style.clipPath = "";
     }
-    if (FR) FR.style.transform = `rotateY(${c.f.toFixed(2)}deg)`;
+    // the card trick: three turns on top of the flip, fast then slowing, the foil flaring as it goes
+    let extra = 0;
+    if (this.spinT0) {
+      const q = (now - this.spinT0) / 1500;
+      if (q >= 1) {
+        this.spinT0 = 0;
+        CR?.style.removeProperty("--hi");
+      } else {
+        extra = 1080 * (1 - Math.pow(1 - q, 3));
+        CR?.style.setProperty("--hi", (1 + 2.2 * Math.sin(Math.PI * q)).toFixed(3));
+      }
+    }
+    if (FR) FR.style.transform = `rotateY(${(c.f + extra).toFixed(2)}deg)`;
     if (SH) {
       SH.style.opacity = String(c.mix);
       SH.style.transform = `translateX(${(-rY * 3).toFixed(1)}px) scale(${(1 - bob / 90).toFixed(3)})`;
@@ -2807,6 +3015,39 @@ export default class Recap extends Component<Props, State> {
         g.stroke();
       }
       g.globalAlpha = 1;
+      const star = (x: number, y: number, r: number, rot: number) => {
+        g.save();
+        g.translate(x, y);
+        g.rotate(rot);
+        g.beginPath();
+        g.moveTo(0, -r);
+        g.quadraticCurveTo(0, 0, r, 0);
+        g.quadraticCurveTo(0, 0, 0, r);
+        g.quadraticCurveTo(0, 0, -r, 0);
+        g.quadraticCurveTo(0, 0, 0, -r);
+        g.fill();
+        g.restore();
+      };
+      const gl = this.glints;
+      if (gl.length) {
+        g.save();
+        g.fillStyle = "#fff";
+        g.shadowColor = "rgba(255,190,250,.95)";
+        g.shadowBlur = 16;
+        for (let i = gl.length - 1; i >= 0; i--) {
+          const q = (now - gl[i].t0) / gl[i].life;
+          if (q >= 1) {
+            gl.splice(i, 1);
+            continue;
+          }
+          if (q < 0) continue;
+          const k = Math.sin(Math.PI * q);
+          const p = gl[i];
+          star(p.x, p.y, p.r * k, p.rot + q * 0.8);
+          star(p.x, p.y, p.r * k * 0.45, p.rot + q * 0.8 + Math.PI / 4);
+        }
+        g.restore();
+      }
     }
     if (!this.artDone && this.artCv.current) {
       this.drawArt(this.artCv.current);
@@ -3350,53 +3591,83 @@ export default class Recap extends Component<Props, State> {
     return statsOf(this.D).slice(0, CHART.length);
   }
 
+  /** which star the pointer is on, by distance with some slack before it lets go: element enter and
+   * leave fired again on every wobble across the gap between a star and its label */
+  chartMove(x: number, y: number) {
+    const n = this.chartStats().length;
+    const el = (performance.now() - this.stepT) / 1000;
+    const near = (i: number, r: number) => el > CHART_T0 + i * CHART_DT && Math.hypot(x - CHART[i][0], y - CHART[i][1]) < r + (i ? 0 : 12);
+    const cur = this.state.hot;
+    if (cur >= 0 && near(cur, 95)) return;
+    let hot = -1;
+    for (let i = 0; i < n; i++) if (near(i, 60)) hot = i;
+    if (hot === cur) return;
+    this.setState({ hot });
+    if (hot >= 0) this.traceStar(hot, n);
+  }
+
+  /** stars hovered in order, first to last, stay lit and light the line to them; all of them lights
+   * the constellation. going back over lit ones doesn't count, skipping ahead starts over */
+  traceStar(i: number, n: number) {
+    const k = this.state.lit;
+    const pan = (CHART[i][0] - 1200) / 900;
+    if (n < 3 || k >= n || i < k || (i > k && k === 0)) {
+      au.sparkle(starHz(i), { gain: 0.4, n: 2, decay: 0.6, pan });
+      return;
+    }
+    if (i > k) {
+      au.sparkle(starHz(i), { gain: 0.4, n: 2, decay: 0.6, pan });
+      this.setState({ lit: 0 });
+      return;
+    }
+    au.sparkle(starHz(i), { gain: 0.55, n: 3, decay: 0.8, pan });
+    this.setState({ lit: k + 1 });
+    if (k + 1 < n) return;
+    au.starfall([0, 1, 2, 3, 4, 5, 6, 7].map(starHz), { gain: 0.9 });
+    au.play("stinger-crown", { at: 0.1, gain: 0.6 });
+  }
+
   renderChart() {
     const D = this.D;
     const stats = this.chartStats();
     const pts = CHART.slice(0, stats.length);
     const T = (i: number) => CHART_T0 + i * CHART_DT;
+    const { lit, hot } = this.state;
+    const traced = stats.length >= 3 && lit >= stats.length;
+    const sides = chartSides(stats);
     return (
-      <div className="rc-ch rc-chart">
+      <div className={"rc-ch rc-chart" + (traced ? " traced" : "")}>
         <div className="rc-copy rc-nopt" style={{ left: 120, top: 120, width: 560, gap: 24 }}>
           <span className="rc-kick">{this.kick("chart")}</span>
           <h1 className="rc-h1" style={rise(0.05)}>
             Everything else you did, charted.
           </h1>
           <p className="rc-p" style={rise(0.15)}>
-            {D.through ? `Jan 1 to ${D.through}. ` : ""}Every star is something you did in Setsu. Hover one.
+            {D.span ? `${D.span}. ` : ""}Every star is something you did in Setsu. Hover one.
           </p>
         </div>
         <svg className="rc-chart-lines" viewBox="0 0 1920 1080" aria-hidden>
-          <defs>
-            <mask id="rc-chart-gaps" maskUnits="userSpaceOnUse" x={0} y={0} width={1920} height={1080}>
-              <rect width={1920} height={1080} fill="#fff" />
-              {stats.map((st, i) => {
-                // about the label's size: the value is the widest line unless the note runs longer
-                const w = Math.max(st.v.length * (i ? 25 : 35), st.l.length * 11, st.n.length * 7.6) + 24;
-                const h = (i ? 70 : 84) + (st.n ? 22 : 0);
-                return <rect key={i} x={pts[i][0] - w / 2} y={pts[i][1] + (i ? 18 : 24)} width={w} height={h} rx={12} fill="#000" />;
-              })}
-            </mask>
-          </defs>
           {CHART_DUST.map(([x, y, a], i) => (
             <circle key={"d" + i} cx={x} cy={y} r={1.6} fill="#e9dcff" style={{ opacity: a, ...fade(0.2 + (i % 7) * 0.1, 1.2) }} />
           ))}
-          <g mask="url(#rc-chart-gaps)">
+          <g>
             {pts.slice(1).map(([x, y], i) => (
               <line key={i} x1={pts[i][0]} y1={pts[i][1]} x2={x} y2={y} pathLength={1} style={{ animationDelay: (T(i) + 0.04).toFixed(2) + "s" }} />
             ))}
+            {traced
+              ? null
+              : pts.slice(1, lit).map(([x, y], i) => <line key={"t" + i} className="rc-trace" x1={pts[i][0]} y1={pts[i][1]} x2={x} y2={y} pathLength={1} />)}
           </g>
         </svg>
         {stats.map((st, i) => (
           <button
             key={st.l}
             type="button"
-            className={"rc-node" + (i === 0 ? " rc-node-big" : "")}
-            onPointerEnter={() => au.sparkle(starHz(i), { gain: 0.4, n: 2, decay: 0.6, pan: (pts[i][0] - 1200) / 900 })}
+            className={"rc-node" + (i === 0 ? " rc-node-big" : "") + (i === hot ? " on" : "") + (i < lit && !traced ? " lit" : "")}
             style={{ left: pts[i][0], top: pts[i][1], ["--d" as string]: T(i).toFixed(2) + "s", ["--tw" as string]: (2.4 + (i % 4) * 0.7).toFixed(1) + "s" }}
           >
             <span className="rc-node-star" style={{ backgroundImage: `url("${starUrl}")` }} />
-            <span className="rc-node-lab">
+            <span className={"rc-node-lab " + sides[i]}>
               <span className="rc-node-v">{st.v}</span>
               <span className="rc-node-l">{st.l}</span>
               {st.n ? <span className="rc-node-n">{st.n}</span> : null}
@@ -3627,7 +3898,7 @@ export default class Recap extends Component<Props, State> {
     const key = this.curKey();
     return (
       <>
-      <div className="rc-root" ref={this.rootRef} onPointerOver={this.overUi} onPointerDown={au.unlock} onPointerMove={this.rootMove} onPointerLeave={this.rootLeave}>
+      <div className="rc-root" ref={this.rootRef} onPointerOver={this.overUi} onPointerDown={this.rootDown} onPointerMove={this.rootMove} onPointerLeave={this.rootLeave}>
         <canvas ref={this.skyCv} className="rc-sky" />
         <div className="rc-stage" ref={this.stgRef} style={{ transform: `scale(${st.k})`, ["--bx" as string]: st.bx + "px", ["--by" as string]: st.by + "px" }}>
           {st.intro ? this.renderIntro() : null}

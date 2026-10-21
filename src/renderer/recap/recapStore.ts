@@ -1,6 +1,7 @@
-// the year recap is hidden until it ships. in the devtools console __recap() turns its rail
-// button on and remembers that across launches, __recap(false) turns it off, __recap(2025) points
-// it at another year for this session. even on, the button only shows once main says the year
+// the 2026 recap comes out for everyone at once on Oct 21 2026, 20:00 CEST (18:00 UTC); until then
+// it's hidden. in the devtools console __recap() turns its rail button on and remembers that across
+// launches, __recap(false) turns it off until the release time, __recap(2025) points it at another
+// year for this session. even on, the button only shows once main says the year
 // has enough to recap (recapEligible: 10 clips on 3 days); __recap("force") shows it regardless. __recapMix() toggles the sound mixer over the recap,
 // __recapShare() saves the shared page's payload (below). once a year's recap has been seen through,
 // its rail button flies into the settings button and from then on only shows in the settings rail;
@@ -9,6 +10,9 @@
 import { useSyncExternalStore } from "react";
 
 const KEY = "clip-library:recap-pill";
+/** the one recap there is; main gives 2026 its own span, Oct 21 2025 to Oct 21 2026 */
+const RECAP_YEAR = 2026;
+const OPENS_AT = Date.UTC(2026, 9, 21, 18, 0);
 const FORCE_KEY = "clip-library:recap-force";
 
 interface RecapState {
@@ -63,12 +67,13 @@ const writeFlag = (name: string, year: number, on: boolean) => {
 };
 const flagsFor = (year: number) => ({ finished: readFlag("finished", year), docked: readFlag("docked", year) });
 
-const year0 = new Date().getFullYear();
+const year0 = RECAP_YEAR;
+const out = () => Date.now() >= OPENS_AT;
 // one store per window, kept on it: when the dev server hot-swapped this module the copies each had
 // their own state, the recap marked one finished while the rail button watched the other
 const G = window as unknown as { __recapStore?: { state: RecapState; listeners: Set<() => void> } };
 const store = (G.__recapStore ??= {
-  state: { enabled: readKey(KEY), year: year0, open: false, mixer: false, flyNow: 0, eligible: null, eligibleYear: null, force: readKey(FORCE_KEY), ...flagsFor(year0) },
+  state: { enabled: readKey(KEY) || out(), year: year0, open: false, mixer: false, flyNow: 0, eligible: null, eligibleYear: null, force: readKey(FORCE_KEY), ...flagsFor(year0) },
   listeners: new Set(),
 });
 
@@ -76,6 +81,11 @@ function set(next: Partial<RecapState>): void {
   store.state = { ...store.state, ...next };
   for (const l of store.listeners) l();
 }
+
+// an app left open over the release time gets the button then, no restart. setTimeout can't wait
+// past 24.8 days, a launch that close is the only one that needs it
+const wait = OPENS_AT - Date.now();
+if (wait > 0 && wait < 2 ** 31 - 1) window.setTimeout(() => set({ enabled: true }), wait + 500);
 
 function subscribe(cb: () => void): () => void {
   store.listeners.add(cb);

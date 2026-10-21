@@ -26,8 +26,16 @@ const OWNER_SHARE = 0.6;
 const MIN_CLIPS = 10;
 const MIN_DAYS = 3;
 
-// Date.UTC keeps a DST change from shifting the day count
-const dayOfYear = (d) => Math.round((Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) - Date.UTC(d.getFullYear(), 0, 1)) / 864e5);
+// the 2026 recap came out on Oct 21 2026 and covers the year up to that day, both Oct 21s in;
+// any other year is its calendar year. [y, m0, d] of the first day and the day after the last
+const SPANS = { 2026: { from: [2025, 9, 21], to: [2026, 9, 22] } };
+const spanOf = (year) => {
+  const s = SPANS[year];
+  return s ? { from: new Date(...s.from), to: new Date(...s.to) } : { from: new Date(year, 0, 1), to: new Date(year + 1, 0, 1) };
+};
+const inSpan = (d, sp) => Boolean(d) && d >= sp.from && d < sp.to;
+// days since the span's first day. Date.UTC keeps a DST change from shifting the count
+const dayIn = (d, from) => Math.round((Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) - Date.UTC(from.getFullYear(), from.getMonth(), from.getDate())) / 864e5);
 const fmtDay = (d) => `${MONTHS[d.getMonth()]} ${d.getDate()}`;
 const pad = (n) => String(n).padStart(2, '0');
 
@@ -46,14 +54,15 @@ async function readJson(file) {
   }
 }
 
-/** one year of the activity log, each line as written */
-async function readActivity(year) {
+/** the activity log over a recap's span, each line as written; the log is one file per month */
+async function readActivity(sp) {
   const dir = path.join(app.getPath('userData'), 'activity_logs');
   const out = [];
-  for (let m = 1; m <= 12; m++) {
+  for (let m = new Date(sp.from.getFullYear(), sp.from.getMonth(), 1); m < sp.to; m = new Date(m.getFullYear(), m.getMonth() + 1, 1)) {
+    const y = m.getFullYear();
     let text;
     try {
-      text = await fs.readFile(path.join(dir, `user_activity_log_${year}-${pad(m)}.jsonl`), 'utf8');
+      text = await fs.readFile(path.join(dir, `user_activity_log_${y}-${pad(m.getMonth() + 1)}.jsonl`), 'utf8');
     } catch {
       continue;
     }
@@ -61,7 +70,10 @@ async function readActivity(year) {
       if (!line.trim()) continue;
       try {
         const e = JSON.parse(line);
-        if (e && e.year === year && typeof e.type === 'string') out.push(e);
+        if (!e || typeof e.type !== 'string') continue;
+        // the first and last month are only partly in; a line without a time goes by its year
+        const t = validDate(e.timestamp);
+        if (t ? inSpan(t, sp) : e.year === y) out.push(e);
       } catch {
         // half-written last line from a crash
       }
@@ -86,14 +98,15 @@ async function recapEligible(year, getSettings) {
   const key = `${settings?.clipLocation || ''}|${year}`;
   const hit = eligibleCache.get(key);
   if (hit && Date.now() - hit.at < ELIGIBLE_TTL_MS) return hit.res;
+  const sp = spanOf(year);
   let clips = 0;
   const days = new Set();
   try {
     for (const c of await clipsModule.getClips(getSettings)) {
       const d = validDate(c.createdAt);
-      if (!d || d.getFullYear() !== year) continue;
+      if (!inSpan(d, sp)) continue;
       clips++;
-      days.add(dayOfYear(d));
+      days.add(dayIn(d, sp.from));
     }
   } catch {
     // no readable clip folder, nothing to recap
@@ -113,9 +126,10 @@ async function getRecap(year, getSettings) {
   const folder = settings.clipLocation;
   const metaDir = metadata.getMetadataFolder(folder);
   const now = new Date();
+  const sp = spanOf(year);
 
   const all = await clipsModule.getClips(getSettings);
-  const inYear = all.filter((c) => validDate(c.createdAt)?.getFullYear() === year);
+  const inYear = all.filter((c) => inSpan(validDate(c.createdAt), sp));
   let sidecars = new Set();
   try {
     sidecars = new Set((await fs.readdir(metaDir)).map((f) => f.toLowerCase()));
@@ -163,7 +177,7 @@ async function getRecap(year, getSettings) {
       named: Boolean(c.customName) && c.customName !== base,
       private: Array.isArray(tags) && tags.includes('Private'),
       date: d,
-      day: dayOfYear(d),
+      day: dayIn(d, sp.from),
       hour: d.getHours() + d.getMinutes() / 60,
       bytes: stat?.size || 0,
       duration,
@@ -282,7 +296,7 @@ async function getRecap(year, getSettings) {
   }
   const n = trimmed.length;
 
-  const events = await readActivity(year);
+  const events = await readActivity(sp);
   const act = {};
   const exports = {};
   const speeds = {};
@@ -351,11 +365,12 @@ async function getRecap(year, getSettings) {
   }
 
   const longest = clips.filter((c) => c.named && !c.private).reduce((a, c) => (!a || c.title.length > a.length ? c.title : a), null);
-  const through = year === now.getFullYear() ? now : new Date(year, 11, 31);
+  const through = now < sp.to ? now : new Date(sp.to.getFullYear(), sp.to.getMonth(), sp.to.getDate() - 1);
   const voiceFirst = clips.find((c) => c.discord);
 
   return {
     year,
+    from: `${sp.from.getFullYear()}-${pad(sp.from.getMonth() + 1)}-${pad(sp.from.getDate())}`,
     through: fmtDay(through),
     fps: 60,
     owner,

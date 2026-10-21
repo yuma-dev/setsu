@@ -1345,7 +1345,7 @@ img {
           el(
             "div",
             { class: "intro" },
-            el("span", { class: "kick" }, `RECAP ${yr} · JAN 1 TO ${str(P.through, 20).toUpperCase()}`),
+            el("span", { class: "kick" }, `RECAP ${yr} · THE YEAR TO ${str(P.through, 20).toUpperCase()}`),
             el("div", { class: "who" }, avatar(P.owner && P.owner.avatar, name), el("div", null, el("div", { class: "who-name" }, name), P.owner && P.owner.handle ? el("div", { class: "who-handle" }, "@" + str(P.owner.handle, 40)) : null)),
             el("h1", { class: "type" }, str(P.type && P.type.name) || "Star Clipper"),
             P.type && P.type.line ? el("p", { class: "line" }, str(P.type.line, 300)) : null,

@@ -157,21 +157,18 @@ export function pickRef(list: Array<[string, number, string]>, actual: number): 
   return { name: best[0], h: best[1], kind: best[2] };
 }
 
-/** day-of-year helpers for one year; leap years shift everything after February */
+/** day numbers, counted from the recap's first day, to dates */
 export interface Calendar {
-  ms: number[];
-  monthOf(d: number): number;
+  /** the day number of the 1st of d's month, or the first day if that's later */
+  monthStart(d: number): number;
   fmtD(d: number): string;
 }
-export function calendar(year: number): Calendar {
-  const ms = [0];
-  for (let m = 0; m < 11; m++) ms.push(ms[m] + new Date(year, m + 1, 0).getDate());
-  const monthOf = (d: number) => {
-    let m = 0;
-    for (let i = 0; i < 12; i++) if (d >= ms[i]) m = i;
-    return m;
+export function calendar(y: number, m = 0, day = 1): Calendar {
+  const at = (d: number) => new Date(y, m, day + d);
+  return {
+    monthStart: (d) => Math.max(0, d - at(d).getDate() + 1),
+    fmtD: (d) => `${MLs[at(d).getMonth()]} ${at(d).getDate()}`,
   };
-  return { ms, monthOf, fmtD: (d) => `${MLs[monthOf(d)]} ${d - ms[monthOf(d)] + 1}` };
 }
 
 /** art first, the exe icon behind it; both go in as css layers or canvas fallbacks */
@@ -201,7 +198,11 @@ const tidy = (v: unknown) => (typeof v === "string" ? v.replace(/[\u0000-\u001f\
 
 export function buildModel(R: RecapData, owner: Owner) {
   const year = Number.isInteger(R.year) ? R.year : new Date().getFullYear();
-  const cal = calendar(year);
+  const from = /^(\d{4})-(\d{2})-(\d{2})$/.exec(R.from ?? "");
+  const [fy, fm, fd] = from ? [Number(from[1]), Number(from[2]) - 1, Number(from[3])] : [year, 0, 1];
+  const cal = calendar(fy, fm, fd);
+  // "Jan 1 to Oct 21", or with the years when the span starts in the one before
+  const span = !R.through ? "" : fy === year ? `${MLs[fm]} ${fd} to ${R.through}` : `${MLs[fm]} ${fd}, ${fy} to ${R.through}, ${year}`;
   // whatever main sent, as finite numbers: an older main or a half-written log leaves holes
   const RC = R.clips ?? ({} as Partial<RecapData["clips"]>);
   const C = {
@@ -241,7 +242,7 @@ export function buildModel(R: RecapData, owner: Owner) {
     if (p[0] > lastDay) lastDay = p[0];
   }
   if (!pts.length) firstDay = lastDay = 0;
-  const dayMin = cal.ms[cal.monthOf(firstDay)];
+  const dayMin = cal.monthStart(firstDay);
   const dayMax = pts.length ? lastDay + 1 : dayMin + 1;
   const friends: Friend[] = (R.friends ?? [])
     .filter((f) => num(f.clips) > 0)
@@ -286,6 +287,7 @@ export function buildModel(R: RecapData, owner: Owner) {
     cal,
     year,
     through: R.through || "",
+    span,
     fps: num(R.fps) || 60,
     count: C.count,
     seconds: C.seconds,
