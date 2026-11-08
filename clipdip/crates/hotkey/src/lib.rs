@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use tracing::{debug, info};
+use tracing::info;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -20,7 +20,7 @@ use windows::Win32::UI::Input::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
     PostThreadMessageW, RegisterClassExW, TranslateMessage, HMENU, HWND_MESSAGE, MSG,
-    RI_KEY_BREAK, WINDOW_EX_STYLE, WINDOW_STYLE, WM_INPUT, WM_QUIT, WNDCLASSEXW,
+    RI_KEY_BREAK, RI_KEY_E0, WINDOW_EX_STYLE, WINDOW_STYLE, WM_INPUT, WM_QUIT, WNDCLASSEXW,
 };
 
 /// mirrors `MOD_*` from `winuser.h`, kept for parsing even though we no
@@ -184,6 +184,136 @@ fn parse_vk(key: &str) -> Result<u32> {
     ))
 }
 
+/// modifier keys by side, so AltGr (LCtrl+RAlt) and a stuck key show up in logs
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Held(pub u8);
+
+const L_CTRL: u8 = 1 << 0;
+const R_CTRL: u8 = 1 << 1;
+const L_ALT: u8 = 1 << 2;
+const R_ALT: u8 = 1 << 3;
+const L_SHIFT: u8 = 1 << 4;
+const R_SHIFT: u8 = 1 << 5;
+const L_WIN: u8 = 1 << 6;
+const R_WIN: u8 = 1 << 7;
+const SIDE_NAMES: [&str; 8] = ["LCtrl", "RCtrl", "LAlt", "RAlt", "LShift", "RShift", "LWin", "RWin"];
+
+impl Held {
+    /// sides folded into `MOD_*` bits, what bindings match against
+    pub fn modifiers(self) -> Modifiers {
+        let mut m = 0;
+        if self.0 & (L_CTRL | R_CTRL) != 0 {
+            m |= Modifiers::CONTROL.0;
+        }
+        if self.0 & (L_ALT | R_ALT) != 0 {
+            m |= Modifiers::ALT.0;
+        }
+        if self.0 & (L_SHIFT | R_SHIFT) != 0 {
+            m |= Modifiers::SHIFT.0;
+        }
+        if self.0 & (L_WIN | R_WIN) != 0 {
+            m |= Modifiers::WIN.0;
+        }
+        Modifiers(m)
+    }
+}
+
+impl std::fmt::Display for Held {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0 == 0 {
+            return f.write_str("none");
+        }
+        let mut first = true;
+        for (i, name) in SIDE_NAMES.iter().enumerate() {
+            if self.0 & (1 << i) != 0 {
+                if !first {
+                    f.write_str("+")?;
+                }
+                f.write_str(name)?;
+                first = false;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `MOD_*` bit for one side bit
+fn side_modifier(side: u8) -> u32 {
+    match side {
+        L_CTRL | R_CTRL => Modifiers::CONTROL.0,
+        L_ALT | R_ALT => Modifiers::ALT.0,
+        L_SHIFT | R_SHIFT => Modifiers::SHIFT.0,
+        _ => Modifiers::WIN.0,
+    }
+}
+
+/// raw input reports generic VK_CONTROL/VK_MENU/VK_SHIFT, the side is in the E0 flag
+/// (ctrl, alt) or the scan code (shift, 0x36 is right)
+fn modifier_side(vk: u32, make_code: u16, e0: bool) -> Option<u8> {
+    Some(match vk {
+        0xA2 => L_CTRL,
+        0xA3 => R_CTRL,
+        0x11 if e0 => R_CTRL,
+        0x11 => L_CTRL,
+        0xA4 => L_ALT,
+        0xA5 => R_ALT,
+        0x12 if e0 => R_ALT,
+        0x12 => L_ALT,
+        0xA0 => L_SHIFT,
+        0xA1 => R_SHIFT,
+        0x10 if make_code == 0x36 => R_SHIFT,
+        0x10 => L_SHIFT,
+        0x5B => L_WIN,
+        0x5C => R_WIN,
+        _ => return None,
+    })
+}
+
+/// a hotkey press that matched
+#[derive(Clone, Copy, Debug)]
+pub struct Press {
+    pub held: Held,
+    /// fired on a key-up whose down never arrived
+    pub orphan: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NearMissReason {
+    /// all wanted modifiers plus more, e.g. ctrl held for crouch, or AltGr (LCtrl+RAlt) for Alt
+    ExtraModifiers,
+    /// only some of the wanted modifiers
+    MissingModifiers,
+    /// key went down first, the modifier followed while it was still held
+    KeyBeforeModifier,
+    /// the modifier came up just before the key went down
+    ModifierReleasedEarly,
+}
+
+impl NearMissReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExtraModifiers => "extra_modifiers",
+            Self::MissingModifiers => "missing_modifiers",
+            Self::KeyBeforeModifier => "key_before_modifier",
+            Self::ModifierReleasedEarly => "modifier_released_early",
+        }
+    }
+}
+
+/// a press of a bound key that looked like an attempt at the hotkey but didn't fire
+#[derive(Clone, Copy, Debug)]
+pub struct NearMiss {
+    /// index into the bindings given to `spawn`
+    pub binding: usize,
+    pub reason: NearMissReason,
+    /// the gap for the two timing reasons, how long the extras were down for ExtraModifiers
+    pub ms: u64,
+    pub held: Held,
+}
+
+/// a modifier this close to the key counts as a fumbled chord
+const CHORD_WINDOW: Duration = Duration::from_millis(300);
+
 /// handle to the message-pump thread; drop to stop the listener
 pub struct HotkeyListener {
     thread_id: u32,
@@ -192,24 +322,29 @@ pub struct HotkeyListener {
 
 impl HotkeyListener {
     /// spawns one thread listening for all given bindings, returning one
-    /// `Receiver<()>` per binding (fires on key down-transition, no repeat).
-    /// Only one Raw Input registration exists per process: a second
-    /// `RegisterRawInputDevices` call for the same device type would
-    /// replace the first.
-    pub fn spawn(bindings: &[HotkeyBinding]) -> Result<(Self, Vec<Receiver<()>>)> {
+    /// `Receiver<Press>` per binding (fires on key down-transition, no repeat) plus one
+    /// for near misses. Only one Raw Input registration exists per process: a second
+    /// `RegisterRawInputDevices` call for the same device type would replace the first.
+    ///
+    /// nothing here logs keys. INPUTSINK sees everything typed in any app and the log
+    /// goes up with error events, so only hotkey outcomes leave this crate
+    pub fn spawn(
+        bindings: &[HotkeyBinding],
+    ) -> Result<(Self, Vec<Receiver<Press>>, Receiver<NearMiss>)> {
         assert!(!bindings.is_empty(), "need at least one binding");
 
-        let (event_txs, event_rxs): (Vec<_>, Vec<_>) = bindings
+        let (press_txs, press_rxs): (Vec<_>, Vec<_>) = bindings
             .iter()
-            .map(|_| crossbeam_channel::unbounded::<()>())
+            .map(|_| crossbeam_channel::unbounded::<Press>())
             .unzip();
+        let (near_tx, near_rx) = crossbeam_channel::unbounded::<NearMiss>();
 
         let (ready_tx, ready_rx) = crossbeam_channel::bounded::<Result<u32>>(1);
         let bindings = bindings.to_vec();
 
         let join = std::thread::Builder::new()
             .name("clipdip-hotkey".into())
-            .spawn(move || run_thread(bindings, event_txs, ready_tx))
+            .spawn(move || run_thread(bindings, press_txs, near_tx, ready_tx))
             .context("spawn hotkey thread")?;
 
         let thread_id = ready_rx
@@ -221,7 +356,8 @@ impl HotkeyListener {
                 thread_id,
                 join: Some(join),
             },
-            event_rxs,
+            press_rxs,
+            near_rx,
         ))
     }
 }
@@ -245,15 +381,206 @@ struct ListenerState {
     /// per-binding: whether the non-modifier key is held, to suppress
     /// OS auto-repeat
     key_pressed: Vec<bool>,
-    event_txs: Vec<Sender<()>>,
-    /// modifier-key bitmask currently held
-    modifiers_held: u32,
+    /// per-binding: its key went down with none of the wanted modifiers, to catch one
+    /// landing right after
+    missed_at: Vec<Option<Instant>>,
+    press_txs: Vec<Sender<Press>>,
+    near_tx: Sender<NearMiss>,
+    held: Held,
+    /// per side bit
+    down_at: [Option<Instant>; 8],
+    /// per `MOD_*` bit position, last time neither side was held
+    up_at: [Option<Instant>; 4],
     started: Instant,
 }
 
 /// a key held while the listener (re)starts, e.g. while rebinding it in settings,
 /// releases as an orphan up; don't treat that as a press
 const ORPHAN_UP_GRACE: Duration = Duration::from_secs(2);
+
+impl ListenerState {
+    fn new(
+        bindings: Vec<HotkeyBinding>,
+        press_txs: Vec<Sender<Press>>,
+        near_tx: Sender<NearMiss>,
+        started: Instant,
+    ) -> Self {
+        let n = bindings.len();
+        Self {
+            bindings,
+            key_pressed: vec![false; n],
+            missed_at: vec![None; n],
+            press_txs,
+            near_tx,
+            held: Held::default(),
+            down_at: [None; 8],
+            up_at: [None; 4],
+            started,
+        }
+    }
+
+    fn on_modifier(&mut self, side: u8, is_down: bool, now: Instant) {
+        let idx = side.trailing_zeros() as usize;
+        let bit = side_modifier(side);
+        if !is_down {
+            self.held.0 &= !side;
+            self.down_at[idx] = None;
+            if self.held.modifiers().0 & bit == 0 {
+                self.up_at[bit.trailing_zeros() as usize] = Some(now);
+            }
+            return;
+        }
+        // auto-repeat
+        if self.held.0 & side != 0 {
+            return;
+        }
+        self.held.0 |= side;
+        self.down_at[idx] = Some(now);
+        if bit == Modifiers::SHIFT.0 {
+            return;
+        }
+        for i in 0..self.bindings.len() {
+            let Some(at) = self.missed_at[i] else { continue };
+            if !self.key_pressed[i] || self.bindings[i].modifiers.0 & bit == 0 {
+                continue;
+            }
+            self.missed_at[i] = None;
+            let gap = now.duration_since(at);
+            if gap <= CHORD_WINDOW {
+                self.near_miss(i, NearMissReason::KeyBeforeModifier, gap.as_millis() as u64);
+                return;
+            }
+        }
+    }
+
+    fn on_key(&mut self, vk: u32, is_down: bool, now: Instant) {
+        let Some(first) = self.bindings.iter().position(|b| b.vk == vk) else {
+            return;
+        };
+        // bindings on the same key share one physical key state
+        let was_down = self.key_pressed[first];
+        for i in 0..self.bindings.len() {
+            if self.bindings[i].vk == vk {
+                self.key_pressed[i] = is_down;
+                if !is_down {
+                    self.missed_at[i] = None;
+                }
+            }
+        }
+        // auto-repeat, or the up after a normal down
+        if was_down {
+            return;
+        }
+        if !is_down {
+            // up with no down: something upstream ate the down (another app's
+            // low-level hook bound to the same key). seen in the wild with F8
+            if now.duration_since(self.started) >= ORPHAN_UP_GRACE {
+                self.fire(vk, true);
+            }
+            return;
+        }
+        if self.fire(vk, false) {
+            return;
+        }
+        let held = self.held.modifiers().0;
+        for i in 0..self.bindings.len() {
+            let want = self.bindings[i].modifiers.0;
+            if self.bindings[i].vk != vk {
+                continue;
+            }
+            match classify_miss(want, held, self.released_ms_ago(now)) {
+                Miss::Ignore => {}
+                Miss::Watch => self.missed_at[i] = Some(now),
+                Miss::Reason(reason, ms) => {
+                    let ms = if reason == NearMissReason::ExtraModifiers {
+                        self.extras_held_ms(want, now)
+                    } else {
+                        ms
+                    };
+                    self.near_miss(i, reason, ms);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// sends a press to every binding on `vk` whose modifiers match exactly
+    fn fire(&self, vk: u32, orphan: bool) -> bool {
+        let held = self.held.modifiers().0;
+        let mut fired = false;
+        for (b, tx) in self.bindings.iter().zip(&self.press_txs) {
+            if b.vk == vk && b.modifiers.0 == held {
+                let _ = tx.send(Press {
+                    held: self.held,
+                    orphan,
+                });
+                fired = true;
+            }
+        }
+        fired
+    }
+
+    fn near_miss(&self, binding: usize, reason: NearMissReason, ms: u64) {
+        let _ = self.near_tx.send(NearMiss {
+            binding,
+            reason,
+            ms,
+            held: self.held,
+        });
+    }
+
+    fn released_ms_ago(&self, now: Instant) -> [Option<u64>; 4] {
+        self.up_at
+            .map(|t| t.map(|t| now.duration_since(t).as_millis() as u64))
+    }
+
+    /// longest hold among held modifiers the binding doesn't want, a stuck key shows as
+    /// a huge number
+    fn extras_held_ms(&self, want: u32, now: Instant) -> u64 {
+        (0..8usize)
+            .filter(|&i| self.held.0 & (1 << i) != 0 && side_modifier(1 << i) & want == 0)
+            .filter_map(|i| self.down_at[i])
+            .map(|t| now.duration_since(t).as_millis() as u64)
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+enum Miss {
+    Ignore,
+    /// none of the wanted modifiers yet, watch for one landing right after
+    Watch,
+    Reason(NearMissReason, u64),
+}
+
+/// whether a bound key going down with the wrong modifiers was probably an attempt.
+/// shift alone never counts, a capital letter while typing would look like one
+fn classify_miss(want: u32, held: u32, released_ms_ago: [Option<u64>; 4]) -> Miss {
+    let attempt = want & !Modifiers::SHIFT.0;
+    if attempt == 0 || held == want {
+        return Miss::Ignore;
+    }
+    let missing = want & !held;
+    for (bit, released) in released_ms_ago.iter().enumerate() {
+        if missing & attempt & (1 << bit) == 0 {
+            continue;
+        }
+        if let Some(ms) = *released {
+            if ms <= CHORD_WINDOW.as_millis() as u64 {
+                return Miss::Reason(NearMissReason::ModifierReleasedEarly, ms);
+            }
+        }
+    }
+    if held & attempt == 0 {
+        return Miss::Watch;
+    }
+    let reason = if missing == 0 {
+        NearMissReason::ExtraModifiers
+    } else {
+        NearMissReason::MissingModifiers
+    };
+    Miss::Reason(reason, 0)
+}
 
 thread_local! {
     static LISTENER: RefCell<Option<ListenerState>> = const { RefCell::new(None) };
@@ -285,18 +612,18 @@ fn window_class_name() -> PCWSTR {
 
 fn run_thread(
     bindings: Vec<HotkeyBinding>,
-    event_txs: Vec<Sender<()>>,
+    press_txs: Vec<Sender<Press>>,
+    near_tx: Sender<NearMiss>,
     ready_tx: Sender<Result<u32>>,
 ) {
     let n = bindings.len();
     LISTENER.with(|cell| {
-        *cell.borrow_mut() = Some(ListenerState {
-            key_pressed: vec![false; n],
+        *cell.borrow_mut() = Some(ListenerState::new(
             bindings,
-            event_txs,
-            modifiers_held: 0,
-            started: Instant::now(),
-        });
+            press_txs,
+            near_tx,
+            Instant::now(),
+        ));
     });
 
     let class_name = window_class_name();
@@ -410,60 +737,23 @@ unsafe fn handle_raw_input(h_raw_input: HRAWINPUT) {
     }
     let kb = &raw.data.keyboard;
     let vk = kb.VKey as u32;
-    let is_down = (kb.Flags as u32 & RI_KEY_BREAK) == 0;
-    debug!("raw input: vk=0x{:02X} is_down={}", vk, is_down);
+    let flags = kb.Flags as u32;
+    let is_down = flags & RI_KEY_BREAK == 0;
+    let e0 = flags & RI_KEY_E0 != 0;
+    // E0 shift is the fake one windows wraps around nav keys while numlock is on
+    if vk == 0x10 && e0 {
+        return;
+    }
+    let now = Instant::now();
 
     LISTENER.with(|cell| {
         let mut state_ref = cell.borrow_mut();
         let Some(state) = state_ref.as_mut() else {
             return;
         };
-
-        let mod_bit = match vk {
-            0x11 | 0xA2 | 0xA3 => Modifiers::CONTROL.0, // CONTROL, LCONTROL, RCONTROL
-            0x12 | 0xA4 | 0xA5 => Modifiers::ALT.0,     // MENU, LMENU, RMENU
-            0x10 | 0xA0 | 0xA1 => Modifiers::SHIFT.0,   // SHIFT, LSHIFT, RSHIFT
-            0x5B | 0x5C => Modifiers::WIN.0,             // LWIN, RWIN
-            _ => 0,
-        };
-        if mod_bit != 0 {
-            if is_down {
-                state.modifiers_held |= mod_bit;
-            } else {
-                state.modifiers_held &= !mod_bit;
-            }
-            return;
-        }
-
-        // check every binding against this key event
-        for i in 0..state.bindings.len() {
-            let binding = &state.bindings[i];
-            if vk == binding.vk {
-                if is_down {
-                    if !state.key_pressed[i] && state.modifiers_held == binding.modifiers.0 {
-                        info!(
-                            "hotkey fired: vk=0x{:02X} mods=0x{:02X}",
-                            vk, binding.modifiers.0
-                        );
-                        let _ = state.event_txs[i].send(());
-                    }
-                    state.key_pressed[i] = true;
-                } else {
-                    // up with no down: something upstream ate the down (another app's
-                    // low-level hook bound to the same key). seen in the wild with F8
-                    if !state.key_pressed[i]
-                        && state.modifiers_held == binding.modifiers.0
-                        && state.started.elapsed() >= ORPHAN_UP_GRACE
-                    {
-                        info!(
-                            "hotkey fired on orphan key-up: vk=0x{:02X} mods=0x{:02X}",
-                            vk, binding.modifiers.0
-                        );
-                        let _ = state.event_txs[i].send(());
-                    }
-                    state.key_pressed[i] = false;
-                }
-            }
+        match modifier_side(vk, kb.MakeCode, e0) {
+            Some(side) => state.on_modifier(side, is_down, now),
+            None => state.on_key(vk, is_down, now),
         }
     });
 }
@@ -548,5 +838,178 @@ mod tests {
         assert_eq!(HotkeyBinding::parse("Ctrl+`").unwrap().vk, 0xC0);
         assert_eq!(HotkeyBinding::parse("Ctrl+-").unwrap().vk, 0xBD);
         assert_eq!(HotkeyBinding::parse("Ctrl+[").unwrap().vk, 0xDB);
+    }
+
+    struct Rig {
+        state: ListenerState,
+        presses: Vec<Receiver<Press>>,
+        misses: Receiver<NearMiss>,
+        t0: Instant,
+    }
+
+    impl Rig {
+        fn new(specs: &[&str]) -> Self {
+            let bindings: Vec<_> = specs.iter().map(|s| HotkeyBinding::parse(s).unwrap()).collect();
+            let (txs, presses): (Vec<_>, Vec<_>) =
+                bindings.iter().map(|_| crossbeam_channel::unbounded()).unzip();
+            let (near_tx, misses) = crossbeam_channel::unbounded();
+            let t0 = Instant::now();
+            Self {
+                state: ListenerState::new(bindings, txs, near_tx, t0),
+                presses,
+                misses,
+                t0,
+            }
+        }
+        fn at(&self, ms: u64) -> Instant {
+            self.t0 + Duration::from_millis(ms)
+        }
+        fn mod_(&mut self, side: u8, down: bool, ms: u64) {
+            let now = self.at(ms);
+            self.state.on_modifier(side, down, now);
+        }
+        fn key(&mut self, c: char, down: bool, ms: u64) {
+            let now = self.at(ms);
+            self.state.on_key(c as u32, down, now);
+        }
+        fn presses(&self, i: usize) -> Vec<Press> {
+            self.presses[i].try_iter().collect()
+        }
+        fn misses(&self) -> Vec<NearMiss> {
+            self.misses.try_iter().collect()
+        }
+    }
+
+    #[test]
+    fn exact_chord_fires_once() {
+        let mut r = Rig::new(&["Alt+X"]);
+        r.mod_(L_ALT, true, 0);
+        r.key('X', true, 50);
+        r.key('X', true, 80);
+        r.key('X', true, 110);
+        let p = r.presses(0);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].held.to_string(), "LAlt");
+        assert!(r.misses().is_empty());
+    }
+
+    #[test]
+    fn sprinting_is_extra_modifiers() {
+        let mut r = Rig::new(&["Alt+X"]);
+        r.mod_(L_SHIFT, true, 0);
+        r.mod_(L_ALT, true, 900);
+        r.key('X', true, 1000);
+        assert!(r.presses(0).is_empty());
+        let m = r.misses();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].reason, NearMissReason::ExtraModifiers);
+        assert_eq!(m[0].ms, 1000);
+        assert_eq!(m[0].held.to_string(), "LAlt+LShift");
+    }
+
+    #[test]
+    fn altgr_shows_as_ctrl_and_right_alt() {
+        let mut r = Rig::new(&["Alt+X"]);
+        r.mod_(modifier_side(0x11, 0x1D, false).unwrap(), true, 0);
+        r.mod_(modifier_side(0x12, 0x38, true).unwrap(), true, 0);
+        r.key('X', true, 40);
+        let m = r.misses();
+        assert_eq!(m[0].reason, NearMissReason::ExtraModifiers);
+        assert_eq!(m[0].held.to_string(), "LCtrl+RAlt");
+    }
+
+    #[test]
+    fn key_before_modifier() {
+        let mut r = Rig::new(&["Alt+X"]);
+        r.key('X', true, 0);
+        r.mod_(L_ALT, true, 40);
+        assert!(r.presses(0).is_empty());
+        let m = r.misses();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].reason, NearMissReason::KeyBeforeModifier);
+        assert_eq!(m[0].ms, 40);
+    }
+
+    #[test]
+    fn modifier_released_early() {
+        let mut r = Rig::new(&["Alt+X"]);
+        r.mod_(L_ALT, true, 0);
+        r.mod_(L_ALT, false, 100);
+        r.key('X', true, 150);
+        let m = r.misses();
+        assert_eq!(m[0].reason, NearMissReason::ModifierReleasedEarly);
+        assert_eq!(m[0].ms, 50);
+    }
+
+    #[test]
+    fn missing_modifiers() {
+        let mut r = Rig::new(&["Ctrl+Alt+X"]);
+        r.mod_(L_ALT, true, 0);
+        r.key('X', true, 50);
+        assert_eq!(r.misses()[0].reason, NearMissReason::MissingModifiers);
+    }
+
+    #[test]
+    fn typing_is_never_a_near_miss() {
+        let mut r = Rig::new(&["Alt+X", "Ctrl+Shift+S"]);
+        // x, X, s, S, then a modifier long after
+        r.key('X', true, 0);
+        r.key('X', false, 60);
+        r.mod_(L_SHIFT, true, 100);
+        r.key('X', true, 150);
+        r.key('X', false, 200);
+        r.key('S', true, 250);
+        r.key('S', false, 300);
+        r.mod_(L_SHIFT, false, 350);
+        r.key('S', true, 400);
+        r.key('S', false, 450);
+        r.mod_(L_ALT, true, 2000);
+        assert!(r.misses().is_empty());
+        assert!(r.presses(0).is_empty());
+        assert!(r.presses(1).is_empty());
+    }
+
+    #[test]
+    fn stuck_modifier_shows_its_hold_time() {
+        let mut r = Rig::new(&["Alt+X"]);
+        r.mod_(L_CTRL, true, 0);
+        r.mod_(L_ALT, true, 60_000);
+        r.key('X', true, 60_050);
+        let m = r.misses();
+        assert_eq!(m[0].reason, NearMissReason::ExtraModifiers);
+        assert_eq!(m[0].ms, 60_050);
+    }
+
+    #[test]
+    fn one_side_up_keeps_the_modifier() {
+        let mut r = Rig::new(&["Shift+F5"]);
+        r.mod_(L_SHIFT, true, 0);
+        r.mod_(R_SHIFT, true, 10);
+        r.mod_(R_SHIFT, false, 20);
+        r.state.on_key(0x74, true, r.at(30));
+        assert_eq!(r.presses(0).len(), 1);
+    }
+
+    #[test]
+    fn orphan_up_fires_after_grace_only() {
+        let mut r = Rig::new(&["Alt+X"]);
+        r.mod_(L_ALT, true, 0);
+        r.key('X', false, 500);
+        assert!(r.presses(0).is_empty());
+        r.key('X', false, 3000);
+        let p = r.presses(0);
+        assert_eq!(p.len(), 1);
+        assert!(p[0].orphan);
+    }
+
+    #[test]
+    fn modifier_sides_from_raw_input() {
+        assert_eq!(modifier_side(0x10, 0x2A, false), Some(L_SHIFT));
+        assert_eq!(modifier_side(0x10, 0x36, false), Some(R_SHIFT));
+        assert_eq!(modifier_side(0x11, 0x1D, true), Some(R_CTRL));
+        assert_eq!(modifier_side(0x12, 0x38, false), Some(L_ALT));
+        assert_eq!(modifier_side(0x5C, 0x5C, true), Some(R_WIN));
+        assert_eq!(modifier_side('X' as u32, 0x2D, false), None);
+        assert_eq!(Held::default().to_string(), "none");
     }
 }

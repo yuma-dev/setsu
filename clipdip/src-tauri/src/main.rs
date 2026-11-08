@@ -1423,7 +1423,7 @@ fn spawn_hotkey_listener(
         cfg.hotkey.save_clip, cfg.hotkey.rename_clip, cfg.hotkey.toggle_recording
     );
 
-    let mut binding_events: Vec<LoopEvent> = Vec::new();
+    let mut binding_events: Vec<(LoopEvent, &'static str)> = Vec::new();
     let mut binding_defs: Vec<clipdip_hotkey::HotkeyBinding> = Vec::new();
     for (name, s, event) in [
         ("save", &cfg.hotkey.save_clip, LoopEvent::Save),
@@ -1432,7 +1432,7 @@ fn spawn_hotkey_listener(
     ] {
         match clipdip_hotkey::HotkeyBinding::parse(s) {
             Ok(b) => {
-                binding_events.push(event);
+                binding_events.push((event, name));
                 binding_defs.push(b);
             }
             Err(e) => warn!("{name} hotkey parse failed: {e:#}"),
@@ -1441,7 +1441,7 @@ fn spawn_hotkey_listener(
     // global Escape, only acted on while the update toast is up (loop handler gates it).
     match clipdip_hotkey::HotkeyBinding::parse("Esc") {
         Ok(b) => {
-            binding_events.push(LoopEvent::UpdateEscape);
+            binding_events.push((LoopEvent::UpdateEscape, "esc"));
             binding_defs.push(b);
         }
         Err(e) => warn!("esc binding parse failed: {e:#}"),
@@ -1462,18 +1462,25 @@ fn spawn_hotkey_listener(
     }
 
     match clipdip_hotkey::HotkeyListener::spawn(&binding_defs) {
-        Ok((listener, rxs)) => {
+        Ok((listener, rxs, near_rx)) => {
             info!("hotkey listener spawned ok ({} binding(s))", binding_defs.len());
-            for (event, rx) in binding_events.into_iter().zip(rxs) {
+            let names: Vec<&'static str> = binding_events.iter().map(|(_, n)| *n).collect();
+            for ((event, name), rx) in binding_events.into_iter().zip(rxs) {
                 let tx = ev_tx.clone();
                 std::thread::spawn(move || {
-                    while rx.recv().is_ok() {
+                    while let Ok(press) = rx.recv() {
+                        // esc fires on every press in every game, it's only ours while the update toast is up
+                        if !matches!(event, LoopEvent::UpdateEscape) {
+                            let orphan = if press.orphan { " on orphan key-up" } else { "" };
+                            info!("{name} hotkey fired{orphan}, held {}", press.held);
+                        }
                         if tx.send(event).is_err() {
                             break;
                         }
                     }
                 });
             }
+            std::thread::spawn(move || report_hotkey_near_misses(near_rx, names));
             Some(listener)
         }
         Err(e) => {
@@ -1500,6 +1507,36 @@ fn spawn_hotkey_listener(
             );
             report_pipeline_error(app, format!("hotkeys: {e:#}"));
             None
+        }
+    }
+}
+
+/// a hotkey press that didn't fire leaves no other trace, this is the only signal behind
+/// "had to press it three times" reports. only the hotkey's name and the reason go out, never keys
+fn report_hotkey_near_misses(
+    rx: crossbeam_channel::Receiver<clipdip_hotkey::NearMiss>,
+    names: Vec<&'static str>,
+) {
+    while let Ok(m) = rx.recv() {
+        let name = names.get(m.binding).copied().unwrap_or("unknown");
+        let reason = m.reason.as_str();
+        info!("{name} hotkey near miss: {reason} ({} ms), held {}", m.ms, m.held);
+        if let clipdip_diagnostics::Gate::Send { suppressed } = clipdip_diagnostics::gate(
+            &format!("hotkey_near_miss:{name}:{reason}"),
+            std::time::Duration::from_secs(60),
+        ) {
+            clipdip_diagnostics::report_custom(
+                "hotkey_near_miss",
+                clipdip_diagnostics::Severity::Warning,
+                format!("{name} hotkey pressed but did not fire ({reason})"),
+                Some(serde_json::json!({
+                    "binding": name,
+                    "reason": reason,
+                    "ms": m.ms,
+                    "held": m.held.to_string(),
+                    "occurrences": suppressed + 1,
+                })),
+            );
         }
     }
 }
@@ -3537,6 +3574,45 @@ fn run_control_command(
 
 // main
 
+/// builds up to 3.8.2 logged every key raw input saw, in any app. strip those lines from
+/// the local logs once so they can't go up in a later log tail or diagnostics bundle.
+/// None when an earlier start already did it; no marker on failure so the next start retries
+fn scrub_old_key_lines(log_dir: &std::path::Path) -> Option<usize> {
+    let marker = log_dir.join(".old-key-lines-removed");
+    if marker.exists() {
+        return None;
+    }
+    let contains = |line: &[u8], pat: &[u8]| line.windows(pat.len()).any(|w| w == pat);
+    let mut removed = 0;
+    for name in ["clipdip.log", "clipdip.log.old"] {
+        let path = log_dir.join(name);
+        let Ok(data) = std::fs::read(&path) else { continue };
+        let mut out = Vec::with_capacity(data.len());
+        let mut n = 0;
+        for line in data.split_inclusive(|&b| b == b'\n') {
+            // the per-key line, and esc firing on every press in every game
+            let old = contains(line, b"clipdip_hotkey: raw input:")
+                || (contains(line, b"clipdip_hotkey: hotkey fired") && contains(line, b"vk=0x1B"));
+            if old {
+                n += 1;
+            } else {
+                out.extend_from_slice(line);
+            }
+        }
+        if n == 0 {
+            continue;
+        }
+        let tmp = log_dir.join(format!("{name}.scrub"));
+        if std::fs::write(&tmp, &out).and_then(|_| std::fs::rename(&tmp, &path)).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return Some(removed);
+        }
+        removed += n;
+    }
+    let _ = std::fs::write(&marker, b"");
+    Some(removed)
+}
+
 fn main() {
     // a live presence helper (see live_presence.rs): stdout is its channel to clipdip, logs go to
     // stderr, which clipdip folds into its own log
@@ -3566,11 +3642,13 @@ fn main() {
     let mut set_log_level: Option<
         Box<dyn Fn(Option<clipdip_diagnostics::LogLevel>) + Send + Sync>,
     > = None;
+    let mut old_key_lines_removed: Option<usize> = None;
 
     if let Some(dirs) = directories::ProjectDirs::from("", "", "clipdip") {
         let log_dir = dirs.data_local_dir().join("logs");
         if std::fs::create_dir_all(&log_dir).is_ok() {
             let log_path = log_dir.join("clipdip.log");
+            old_key_lines_removed = scrub_old_key_lines(&log_dir);
 
             // Rotate at startup if the file exceeds 10MB.
             if let Ok(metadata) = std::fs::metadata(&log_path) {
@@ -3625,6 +3703,10 @@ fn main() {
         .with(stdout_layer)
         .with(file_layer)
         .init();
+    match old_key_lines_removed {
+        Some(0) | None => {}
+        Some(n) => info!("removed {n} old per-key lines from the local logs"),
+    }
 
     // global profiler opt-in; controls the periodic stage reporter and the per-save timing logs below
     if matches!(
@@ -3968,4 +4050,29 @@ fn main() {
                 _ => {}
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn scrub_old_key_lines_once() {
+        let dir = std::env::temp_dir().join(format!("clipdip-keys-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = "a INFO clipdip: pipeline started\n\
+            b DEBUG clipdip_hotkey: raw input: vk=0x41 is_down=true\n\
+            c INFO clipdip_hotkey: hotkey fired: vk=0x1B mods=0x00\n\
+            d INFO clipdip_hotkey: hotkey fired: vk=0x58 mods=0x01\n\
+            e INFO clipdip: clip saved\n";
+        std::fs::write(dir.join("clipdip.log"), log).unwrap();
+        assert_eq!(super::scrub_old_key_lines(&dir), Some(2));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("clipdip.log")).unwrap(),
+            "a INFO clipdip: pipeline started\n\
+            d INFO clipdip_hotkey: hotkey fired: vk=0x58 mods=0x01\n\
+            e INFO clipdip: clip saved\n"
+        );
+        assert_eq!(super::scrub_old_key_lines(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
