@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Once, OnceLock};
 use std::time::{Duration, Instant};
 
-const DEFAULT_BASE_URL: &str = "https://logs.yuma-homeserver.online";
+const DEFAULT_BASE_URL: &str = "https://logs.setsu.gg";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(900); // 15 min
 const HEARTBEAT_RETRY: Duration = Duration::from_secs(60);
 const FLUSH_MIN_INTERVAL: Duration = Duration::from_secs(2); // rate limit: events <=1/s

@@ -97,7 +97,7 @@ clip data is transmitted.
 
 ---
 
-## 6. Diagnostics & crash telemetry: `logs.yuma-homeserver.online`
+## 6. Diagnostics & crash telemetry: `logs.setsu.gg`
 
 To find and fix bugs, **both** parts of Setsu can send **anonymous** diagnostics to a
 developer-operated server:
@@ -177,9 +177,9 @@ rely on your **consent** (Art. 6(1)(a)).
 | Recipient | Purpose | What is sent | When |
 |---|---|---|---|
 | `social.setsu.gg` (Setsu Sharing, operated by us) | Accounts, clip sharing, social feed | Discord identity, uploaded video + title + tags + @mentions, banner, reactions/comments | Only after you sign in / share |
-| `logs.yuma-homeserver.online` (Diagnostics, operated by us) | Crash/bug diagnostics for the **library app** | Random install/machine/session IDs, app version, hardware profile, feature settings, error events, aggregated timing metrics, log tails on fatal errors | Auto (opt-out) |
-| `logs.yuma-homeserver.online` (Diagnostics, operated by us) | Crash/bug diagnostics for the **recorder (Setsu Recorder)** | Random install/machine/session IDs, app version, hardware and capture configuration, capture/encoder failures, log tails | Auto (separate opt-out) |
-| `logs.yuma-homeserver.online` (Diagnostics, operated by us) | Manual problem reports | One bundle: logs, settings files, activity log, console output, recorder logs and status, crash-dump listing, system info, your note | Only when you press "Export and upload" |
+| `logs.setsu.gg` (Diagnostics, operated by us) | Crash/bug diagnostics for the **library app** | Random install/machine/session IDs, app version, hardware profile, feature settings, error events, aggregated timing metrics, log tails on fatal errors | Auto (opt-out) |
+| `logs.setsu.gg` (Diagnostics, operated by us) | Crash/bug diagnostics for the **recorder (Setsu Recorder)** | Random install/machine/session IDs, app version, hardware and capture configuration, capture/encoder failures, log tails | Auto (separate opt-out) |
+| `logs.setsu.gg` (Diagnostics, operated by us) | Manual problem reports | One bundle: logs, settings files, activity log, console output, recorder logs and status, crash-dump listing, system info, your note | Only when you press "Export and upload" |
 | GitHub (`github.com`) | Update check & download | Generic User-Agent only | On update check/download |
 | Discord (`discord.com`) | Login & voice-roster read | OAuth login; reads your live voice-channel membership | Only if you connect Discord |
 

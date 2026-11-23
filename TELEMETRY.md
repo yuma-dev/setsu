@@ -1,7 +1,7 @@
 # Setsu telemetry
 
 Setsu sends anonymous crash and error reports to a self-hosted server
-(`logs.yuma-homeserver.online`, operated by the Setsu developer) so that
+(`logs.setsu.gg`, operated by the Setsu developer) so that
 failures on machines we do not own become visible and fixable. This document is
 the complete, auditable description of what is sent. The client code lives in
 [`main/telemetry`](main/telemetry/) and [`src/renderer/telemetry`](src/renderer/telemetry/),

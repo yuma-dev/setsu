@@ -1,7 +1,7 @@
 # Setsu Recorder telemetry
 
 Setsu Recorder (formerly clipdip) sends anonymous crash and error reports to a self-hosted server
-(`logs.yuma-homeserver.online`, operated by the Setsu developer in Germany)
+(`logs.setsu.gg`, operated by the Setsu developer in Germany)
 so that capture failures on machines we do not own become visible and fixable.
 This document is the complete, auditable description of what is sent. The
 client code lives in [`crates/diagnostics`](crates/diagnostics/) and every

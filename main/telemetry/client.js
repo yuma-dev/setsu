@@ -12,7 +12,7 @@ const http = require('http');
 const https = require('https');
 const { URL } = require('url');
 
-const DEFAULT_BASE_URL = 'https://logs.yuma-homeserver.online';
+const DEFAULT_BASE_URL = 'https://logs.setsu.gg';
 const REQUEST_TIMEOUT_MS = 20000;
 
 function resolveBaseUrl() {

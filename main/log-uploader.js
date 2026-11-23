@@ -10,7 +10,7 @@ const consoleBuffer = require('../utils/console-log-buffer');
 const rendererConsole = require('./renderer-console-capture');
 const clipdipModule = require('./clipdip');
 
-const DEFAULT_ENDPOINT = 'https://logs.yuma-homeserver.online/api/logs';
+const DEFAULT_ENDPOINT = 'https://logs.setsu.gg/api/logs';
 
 // tail caps keep an upload sane: clipdip's rolling log can hit its 10 MB rotation limit mid-session
 const MAIN_LOG_TAIL_BYTES = 8 * 1024 * 1024;
@@ -266,7 +266,7 @@ async function uploadSessionLogs({ rendererConsoleLogs, note } = {}) {
 // full bundle upload (zip -> /v1/bundles), same contract as clipdip's Rust uploader
 // (client.rs::upload_bundle). key is build-time injected; missing it falls back to text upload
 
-const DEFAULT_BUNDLE_BASE = 'https://logs.yuma-homeserver.online';
+const DEFAULT_BUNDLE_BASE = 'https://logs.setsu.gg';
 // server rejects bundles over ~50 MB; stop earlier with a clear message
 const MAX_BUNDLE_BYTES = 45 * 1024 * 1024;
 
