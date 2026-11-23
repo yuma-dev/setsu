@@ -100,4 +100,4 @@ Setsu used to be called ClipLib, and the recorder used to be ClipDip. Updating f
 
 ---
 
-[setsu.gg](https://setsu.gg) · [Report an issue](https://github.com/yuma-dev/setsu/issues) · [Privacy](PRIVACY.md) · [Terms](TERMS.md)
+[setsu.gg](https://setsu.gg) · [Ko-fi](https://ko-fi.com/yumadev) · [Report an issue](https://github.com/yuma-dev/setsu/issues) · [Privacy](PRIVACY.md) · [Terms](TERMS.md)

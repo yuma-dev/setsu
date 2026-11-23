@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { Archive, ExternalLink, RefreshCw, UploadCloud } from "lucide-react";
+import { Archive, Coffee, ExternalLink, RefreshCw, UploadCloud } from "lucide-react";
 import { SetGroup, SetRow, StatusLine } from "../rows";
 import Toggle from "../../ui/Toggle";
 import { useSettings } from "../SettingsContext";
 import { clipdipBridge } from "./clipdip/ClipdipContext";
 import { useToast } from "../../ui/Toast";
 import { reportUpdateAvailable } from "../../shell/useUpdater";
+import { KOFI_URL, openExternal } from "../../ui/openExternal";
 import logoUrl from "../../../../assets/logo.png";
 
 /** telemetry docs live at the repo root on the default branch */
@@ -93,16 +94,6 @@ function useTypedPlaceholder(active: boolean): string {
     return () => window.clearTimeout(timer);
   }, [active]);
   return text;
-}
-
-/** opens a link in the system browser, legacy diagnostics used shell.openExternal */
-function openExternal(url: string): void {
-  try {
-    const req = (window as unknown as { require?: (m: string) => { shell: { openExternal(u: string): void } } }).require;
-    req?.("electron").shell.openExternal(url);
-  } catch {
-    /* ignore */
-  }
 }
 
 function formatBytes(value: unknown): string {
@@ -279,6 +270,11 @@ export default function AboutSection() {
               <ExternalLink size={14} /> Open download page
             </button>
           </div>
+        </SetRow>
+        <SetRow title="Support Setsu" description="Setsu is free. If you want to chip in, there's a Ko-fi.">
+          <button type="button" className="btn" onClick={() => openExternal(KOFI_URL)}>
+            <Coffee size={14} /> Ko-fi
+          </button>
         </SetRow>
       </SetGroup>
 

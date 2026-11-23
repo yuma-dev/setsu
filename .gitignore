@@ -32,6 +32,8 @@ package-lock.json
 GEMINI.md
 vendor/
 RELEASE_DRAFT.md
+RELEASE_NOTE.md
+src/renderer/release-note.generated.json
 
 # Local agent/planning notes — not part of the shipped repo
 AGENT.md

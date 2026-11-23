@@ -1,6 +1,8 @@
 import { memo, type CSSProperties } from "react";
 import { Download, Loader2, RefreshCw, RotateCcw } from "lucide-react";
 import { startUpdateDownload, useUpdater } from "./useUpdater";
+import { KOFI_URL, openExternal } from "../ui/openExternal";
+import { useKofiNoteShown } from "./kofiSession";
 
 // Four-point sparkle used for the hover star burst (Game Launcher style).
 function StarSvg() {
@@ -11,11 +13,50 @@ function StarSvg() {
   );
 }
 
+// ko-fi's cup with the heart on it, drawn small enough for the rail icon slot
+function KofiCup() {
+  return (
+    <svg className="kofi-cup" viewBox="0 0 24 24" width="18" height="18" aria-hidden>
+      <path className="kofi-cup-body" d="M2.5 6.5h14v6.75a5.25 5.25 0 0 1-5.25 5.25h-3.5A5.25 5.25 0 0 1 2.5 13.25V6.5z" />
+      <path className="kofi-cup-handle" d="M16.5 8.25h1.6a2.9 2.9 0 0 1 0 5.8h-1.75" />
+      <path className="kofi-cup-heart" d="M9.5 15.4s-3.2-1.9-3.2-4a1.65 1.65 0 0 1 3.2-.6 1.65 1.65 0 0 1 3.2.6c0 2.1-3.2 4-3.2 4z" />
+    </svg>
+  );
+}
+
+function HeartSvg() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden>
+      <path d="M12 21s-9-5.6-9-11.6A4.9 4.9 0 0 1 12 6.9a4.9 4.9 0 0 1 9 2.5C21 15.4 12 21 12 21z" />
+    </svg>
+  );
+}
+
 // sits between the stat cards and profile card in the rail
 // style copied from the Game Launcher rail updater: purple accent, progress fill, hover star burst
 function UpdatePill() {
   const { phase, latestVersion, percent } = useUpdater();
-  if (phase === "idle") return null;
+  const noteShown = useKofiNoteShown();
+  // nothing to update, the slot asks for a tip instead, unless the post-update note already did
+  if (phase === "idle") {
+    if (noteShown) return null;
+    return (
+      <button
+        type="button"
+        data-rail-tip="Buy me a coffee on Ko-fi"
+        className="rail-update rail-update--kofi"
+        onClick={() => openExternal(KOFI_URL)}
+      >
+        <span className="r-ico">
+          <KofiCup />
+        </span>
+        <span className="rail-label">Buy me a coffee</span>
+        <span className="rail-kofi-heart heart-1" aria-hidden><HeartSvg /></span>
+        <span className="rail-kofi-heart heart-2" aria-hidden><HeartSvg /></span>
+        <span className="rail-kofi-heart heart-3" aria-hidden><HeartSvg /></span>
+      </button>
+    );
+  }
 
   const busy = phase === "downloading";
   const label =

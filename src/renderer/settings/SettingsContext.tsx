@@ -83,6 +83,7 @@ export const SETTINGS_DEFAULTS: AppSettings = {
   onboardingVersion: 0,
   analysisIntroSeen: false,
   setsuIntroSeen: false,
+  lastRunVersion: "",
   previewVolume: 0.1,
   speedPitch: "tape",
   ambientGlow: { ...AMBIENT_GLOW_DEFAULTS },

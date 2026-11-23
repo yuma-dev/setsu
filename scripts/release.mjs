@@ -1,6 +1,7 @@
 // One-command GitHub release for ClipLib (ported from clipdip's release flow).
 //
-//   npm run release:preview   generates RELEASE_DRAFT.md from commits; edit it
+//   npm run release:preview   generates RELEASE_DRAFT.md from commits; edit it, and write the
+//                             in-app note in RELEASE_NOTE.md (gen-release-note.mjs bakes it in)
 //   npm run release           build + tag + GitHub release with the installer
 //
 // Flags: --draft, --prerelease, --skip-build, --skip-tag
@@ -15,9 +16,11 @@ import { basename, dirname, join, resolve } from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { generateChangelog } from './changelog.mjs';
+import { readReleaseNote } from './gen-release-note.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const draftFile = join(root, 'RELEASE_DRAFT.md');
+const noteFile = join(root, 'RELEASE_NOTE.md');
 
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 const appTitle = pkg.build?.productName ?? pkg.displayName ?? pkg.name;
@@ -57,6 +60,12 @@ async function main() {
   console.log(body);
   console.log();
 
+  const note = readReleaseNote();
+  console.log(note ? `In-app note:\n\nHey, ${note}\n` : 'In-app note: none, the app shows the default.\n');
+  if (!options.build && note) {
+    console.log('--skip-build: the note only ships if the existing build already has it baked in.\n');
+  }
+
   if (options.build) {
     console.log('Building (renderer + clipdip + installer)...');
     await spawnCommand('npm', ['run', 'build'], { cwd: root, env: process.env });
@@ -90,6 +99,10 @@ async function main() {
   if (existsSync(draftFile)) {
     unlinkSync(draftFile);
     console.log('RELEASE_DRAFT.md cleaned up.');
+  }
+  if (existsSync(noteFile)) {
+    unlinkSync(noteFile);
+    console.log('RELEASE_NOTE.md cleaned up.');
   }
 
   console.log(`Release ${tag} is ready on GitHub Releases.`);

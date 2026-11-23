@@ -211,7 +211,7 @@ function Sidebar({
 
       {/* only renders once __recap() turned it on; after the recap was seen, only in settings */}
       <RecapPill inSettings={route === "settings"} />
-      {/* only renders while an update is available or in flight */}
+      {/* the update while one is available or in flight, a ko-fi link otherwise */}
       <UpdatePill />
       {/* only renders during the one-time library listen */}
       <AnalysisPill />

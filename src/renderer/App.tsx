@@ -10,6 +10,7 @@ import { useProfile } from "./shell/useProfile";
 import VideoPlayer from "./player/VideoPlayer";
 import OnboardingGate from "./onboarding/OnboardingGate";
 import RebrandGate from "./onboarding/RebrandGate";
+import KofiNote from "./onboarding/KofiNote";
 import AnalysisIntro from "./onboarding/AnalysisIntro";
 import RecapGate from "./recap/RecapGate";
 import { useClips } from "./library/useClips";
@@ -350,6 +351,8 @@ export default function App() {
       {/* one-time 3.0 intro + ClipDip setup; wizard chunk loads only when opened, reopenable via __showOnboarding() */}
       <OnboardingGate />
       <RebrandGate />
+      {/* once per update, my avatar asking for a tip */}
+      <KofiNote />
       {/* the analysis heads-up for anyone past the tour; shows once when the library listen starts */}
       <AnalysisIntro />
       {/* year recap overlay, opened from its rail pill; the recap itself is a lazy chunk */}
