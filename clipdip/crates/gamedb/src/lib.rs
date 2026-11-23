@@ -316,7 +316,7 @@ impl GameDb {
         let sq = stem_key(&stem_lower);
         // whole lines only: "Shape of Dreams - Run Manager" is a tool, cutting at " - " made it the game
         for f in forms.lines() {
-            let Some(&app) = idx.by_name.get(&f) else { continue };
+            let Some(&app) = idx.by_main_name.get(&f) else { continue };
             let nq = f.replace(' ', "");
             // both signals have to agree: the title alone matched "Steam" for steamwebhelper.exe
             let agree = nq.chars().count() > 3
@@ -511,7 +511,8 @@ mod tests {
       {"id":"10","name":"Uno Online","executables":[{"name":"uno.exe","os":"win32"}],"third_party_skus":[]},
       {"id":"11","name":"Rocket League","executables":[{"name":"rocketleague.exe","os":"darwin"},{"name":"win64/rocketleague.exe","os":"win32"}],"third_party_skus":[]},
       {"id":"12","name":"Pagoda","executables":[],"third_party_skus":[]},
-      {"id":"13","name":"Find The Needle","icon_hash":"abc","executables":[],"third_party_skus":[{"distributor":"steam","id":"5160800"}]}
+      {"id":"13","name":"Find The Needle","icon_hash":"abc","executables":[],"third_party_skus":[{"distributor":"steam","id":"5160800"}]},
+      {"id":"14","name":"Fortnite","aliases":["Epic Games Launcher"],"executables":[{"name":"fortniteclient-win64-shipping.exe","os":"win32"}],"third_party_skus":[{"distributor":"epic","id":"fn"}]}
     ]"#;
 
     fn db() -> Arc<GameDb> {
@@ -587,6 +588,15 @@ mod tests {
         assert_eq!(run(&db, None, Some("forzahorizon6"), Some("Forza Horizon 6")), Some(("Forza Horizon 6".into(), Source::TitleStem)));
         assert_eq!(run(&db, None, Some("PagodaSteam-Win64-Shipping"), Some("Pagoda  ")), Some(("Pagoda".into(), Source::TitleStem)));
         assert_eq!(run(&db, None, Some("notepad"), Some("Forza Horizon 6")), None);
+    }
+
+    #[test]
+    fn launcher_named_by_an_alias_is_not_the_game() {
+        let db = db();
+        assert_eq!(
+            run(&db, Some(r"C:\Program Files (x86)\Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe"), None, Some("Epic Games Launcher")),
+            None
+        );
     }
 
     #[test]

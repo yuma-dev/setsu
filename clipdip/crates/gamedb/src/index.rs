@@ -100,6 +100,9 @@ pub(crate) struct Index {
     pub by_exe: HashMap<String, Vec<Rule>>,
     /// app by normalized name or alias
     pub by_name: HashMap<String, u32>,
+    /// app by normalized main name only. Discord files "Epic Games Launcher" as a Fortnite
+    /// alias, and the launcher's own title and exe stem then agree on it
+    pub by_main_name: HashMap<String, u32>,
     pub by_steam: HashMap<String, u32>,
     pub by_epic: HashMap<String, u32>,
     pub etag: Option<String>,
@@ -120,6 +123,7 @@ impl Index {
     ) -> Self {
         let mut by_exe: HashMap<String, Vec<Rule>> = HashMap::new();
         let mut by_name = HashMap::new();
+        let mut by_main_name = HashMap::new();
         let mut by_steam = HashMap::new();
         let mut by_epic = HashMap::new();
         for (i, app) in apps.iter().enumerate() {
@@ -134,6 +138,10 @@ impl Index {
             }
             // first claim wins, the list is roughly ordered by app age so the original game keeps
             // its name over later re-releases
+            let main = norm(&app.name);
+            if !main.is_empty() {
+                by_main_name.entry(main).or_insert(i);
+            }
             for n in std::iter::once(&app.name).chain(app.aliases.iter()) {
                 let k = norm(n);
                 if !k.is_empty() {
@@ -151,6 +159,7 @@ impl Index {
             apps,
             by_exe,
             by_name,
+            by_main_name,
             by_steam,
             by_epic,
             etag,
