@@ -39,6 +39,7 @@ import ShareModal from "./ShareModal";
 import SpeedDrum from "./SpeedDrum";
 import FavoriteStar from "./FavoriteStar";
 import { installChromeVisibility } from "./chromeVisibility";
+import { useLiveGlow } from "./useLiveGlow";
 import Timeline from "./Timeline";
 import type { TrackView } from "./Waveform";
 import AddLayer from "./layers/AddLayer";
@@ -66,6 +67,8 @@ const ALERT_CODES: Array<[string, string]> = [
 
 const alertCodeFor = (message: string): string | null =>
   ALERT_CODES.find(([prefix]) => message.startsWith(prefix))?.[1] ?? null;
+
+const getPlayerVideo = () => document.getElementById("video-player") as HTMLVideoElement | null;
 
 interface VideoPlayerProps {
   clipLocation: string;
@@ -114,6 +117,9 @@ function VideoPlayer({ clipLocation, clips, renameClip, removeClips, markClipsWa
   const [flash, setFlash] = useState({ n: 0, playing: false });
   // width / height of the loaded video; the frame takes this shape inside the stage
   const [aspect, setAspect] = useState(16 / 9);
+  const glowWideRef = useRef<HTMLCanvasElement | null>(null);
+  const glowFrameRef = useRef<HTMLCanvasElement | null>(null);
+  const glowCanvases = [glowFrameRef, glowWideRef];
   // where the last mousedown landed; only a press and release both on the backdrop close
   const backdropPressRef = useRef(false);
   // avoids stale closures in the once-only init callbacks
@@ -322,7 +328,7 @@ function VideoPlayer({ clipLocation, clips, renameClip, removeClips, markClipsWa
       loadingOverlay: byId("loading-overlay"),
       playerOverlay: byId("player-overlay"),
       videoClickTarget: byId("video-click-target"),
-      // the frame-sampling glow canvas is gone; the thumbnail glow below replaces it
+      // the glow samples frames in useLiveGlow, not legacy's AmbientGlowManager
       ambientGlowCanvas: null,
       fullscreenPlayer: byId("fullscreen-player"),
       videoControls: byId("video-controls"),
@@ -710,6 +716,7 @@ function VideoPlayer({ clipLocation, clips, renameClip, removeClips, markClipsWa
 
   const glow = settings.ambientGlow;
   const thumbUrl = session?.thumbnailPath ? `file://${session.thumbnailPath}` : null;
+  useLiveGlow(getPlayerVideo, glowCanvases, thumbUrl, glow, isOpen && glow.enabled);
   const glowStyle = {
     "--glow-blur": `${glow.blur}px`,
     "--glow-sat": glow.saturation,
@@ -734,13 +741,13 @@ function VideoPlayer({ clipLocation, clips, renameClip, removeClips, markClipsWa
       }}
     >
       <div id="player-container" style={glowStyle}>
-        {/* the clip's own thumbnail bled out behind the frame; two layers, a wide slow hue drift
-            and a tight one breathing with the frame */}
-        {glow.enabled && thumbUrl ? <img className="pl-glow pl-glow-wide" src={thumbUrl} alt="" aria-hidden="true" /> : null}
+        {/* the playing video bled out behind the frame (useLiveGlow); two layers, a wide slow hue
+            drift and a tight one breathing with the frame */}
+        {glow.enabled ? <canvas ref={glowWideRef} className="pl-glow pl-glow-wide" aria-hidden="true" /> : null}
         {/* stage is the inset area; the frame takes the video's own aspect inside it so no letterbox
             ever shows as black, the glow fills the rest */}
         <div className="pl-stage" style={{ "--ar": aspect } as CSSProperties}>
-        {glow.enabled && thumbUrl ? <img className="pl-glow pl-glow-frame" src={thumbUrl} alt="" aria-hidden="true" /> : null}
+        {glow.enabled ? <canvas ref={glowFrameRef} className="pl-glow pl-glow-frame" aria-hidden="true" /> : null}
         {/* same box as the frame, so the chevrons hang just outside its edges whatever its aspect */}
         <div className="pl-frame-box">
           <button
