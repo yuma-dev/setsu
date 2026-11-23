@@ -91,6 +91,9 @@ export default function KofiNote() {
   useEffect(() => {
     if (!ready || !version || checked.current) return;
     checked.current = true;
+    // npm run dev shares %APPDATA%\Clips\settings.json with the installed app and already runs the
+    // bumped version, so recording it here ate the installed app's note. dev uses the __ commands
+    if (import.meta.env.DEV) return;
     const last = String(settings.lastRunVersion ?? "");
     if (last === version) return;
     void set("lastRunVersion", version);
