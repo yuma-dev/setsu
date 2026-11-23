@@ -519,7 +519,26 @@ clipWarmer.init(getSettings);
 const sendToRenderer = (channel, payload) => {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
 };
-loudnessModule.init({ getSettings, analysis: analysisModule, send: sendToRenderer });
+loudnessModule.init({
+  getSettings,
+  analysis: analysisModule,
+  send: sendToRenderer,
+  // same rule as the mixer: hidden by global pref (Mix by default) or match:false
+  getSkippedTracks: async (clipName) => {
+    const [info, prefs] = await Promise.all([
+      ffmpegModule.getClipInfo(clipName, getSettings, thumbnailsModule),
+      metadataModule.getTrackPreferences(app.getPath.bind(app))
+    ]);
+    const skipped = new Set();
+    for (const t of Array.isArray(info?.audioTracks) ? info.audioTracks : []) {
+      const name = t.name || `Track ${t.ordinal + 1}`;
+      const pref = (prefs && prefs[name]) || {};
+      const hidden = pref.hidden !== undefined ? !!pref.hidden : name === 'Mix';
+      if (hidden || pref.match === false) skipped.add(t.ordinal);
+    }
+    return skipped;
+  }
+});
 analysisModule.init({
   getSettings,
   getClipNames: async () => lastClipNames,

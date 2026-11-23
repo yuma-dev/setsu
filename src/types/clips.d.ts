@@ -90,6 +90,8 @@ export interface VolumeDetail {
   lufs?: number;
   /** headroom cap kept the clip under target so its peaks stay below -1 dBTP */
   capped?: boolean;
+  /** per-track matching: track ordinal to gain */
+  trackGains?: Record<number, number> | null;
 }
 
 export interface AnalysisProgress {
@@ -266,6 +268,10 @@ export interface LoudnessSummary {
   median: number | null;
   headroomDbtp: number;
   maxGainDb: number;
+  /** boosts stop here, cuts go to maxGainDb */
+  maxBoostDb: number;
+  /** clips under this are never raised */
+  quietLufs: number;
   measured: number;
   entries: LoudnessEntry[];
   scan: AnalysisProgress;
@@ -919,7 +925,7 @@ export interface ClipsApi {
   onGameInfoUpdated(cb: (clipNames: string[]) => void): ClipsUnsubscribe;
   onAnalysisProgress(cb: (p: AnalysisProgress) => void): ClipsUnsubscribe;
   onAnalysisReady(cb: (p: { clipName: string; waveform: ClipWaveform }) => void): ClipsUnsubscribe;
-  onLoudnessMeasured(cb: (p: { clipName: string; gain: number; gainDb: number; lufs: number | null }) => void): ClipsUnsubscribe;
+  onLoudnessMeasured(cb: (p: { clipName: string; gain: number; gainDb: number; lufs: number | null; trackGains?: Record<number, number> | null }) => void): ClipsUnsubscribe;
   onCheckActivityState(cb: ClipsEventCallback): ClipsUnsubscribe;
   onCliplibAuthEvent(cb: ClipsEventCallback): ClipsUnsubscribe;
   /** Navigation deep links (cliplib://settings/<section>) forwarded by main. */

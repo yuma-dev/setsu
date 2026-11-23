@@ -15,14 +15,27 @@ const FALLBACK_TARGET = -16;
 const HIST_MIN = -40;
 const HIST_MAX = -6;
 
+interface Limits {
+  headroom: number;
+  maxGain: number;
+  maxBoost: number;
+  quiet: number;
+}
+
 /** same math as main/loudness.js gainFromEntry, so the page shows what the player will do */
-function gainDbFor(e: LoudnessEntry, target: number, headroom: number, maxGain: number) {
+function gainDbFor(e: LoudnessEntry, target: number, { headroom, maxGain, maxBoost, quiet }: Limits) {
   const wanted = target - e.lufs;
   let db = wanted;
   if (e.peak != null) db = Math.min(db, headroom - e.peak);
-  db = Math.max(-maxGain, Math.min(maxGain, db));
-  return { db, capped: db < wanted - 0.05 };
+  db = Math.max(-maxGain, Math.min(maxBoost, db));
+  const isQuiet = e.lufs < quiet;
+  if (isQuiet) db = Math.min(db, 0);
+  return { db, capped: !isQuiet && db < wanted - 0.05, quiet: isQuiet };
 }
+
+const PALETTE_KEY = "track-palette";
+// newest clips name the tracks the recorder writes right now
+const TRACK_NAME_CLIPS = 6;
 
 function fmtDb(db: number) {
   return `${db >= 0 ? "+" : ""}${db.toFixed(1)} dB`;
@@ -76,8 +89,15 @@ export default function LoudnessSection({ lib }: { lib: UseClips }) {
   }, [refresh, analysis.running]);
 
   const entries = summary?.entries ?? [];
-  const headroom = summary?.headroomDbtp ?? -1;
-  const maxGain = summary?.maxGainDb ?? 12;
+  const limits = useMemo<Limits>(
+    () => ({
+      headroom: summary?.headroomDbtp ?? -1,
+      maxGain: summary?.maxGainDb ?? 12,
+      maxBoost: summary?.maxBoostDb ?? 6,
+      quiet: summary?.quietLufs ?? -38,
+    }),
+    [summary?.headroomDbtp, summary?.maxGainDb, summary?.maxBoostDb, summary?.quietLufs],
+  );
   const explicitTarget = settings.loudness?.targetLufs ?? null;
   const median = summary?.median ?? null;
   const target = draftTarget ?? explicitTarget ?? median ?? FALLBACK_TARGET;
@@ -86,17 +106,19 @@ export default function LoudnessSection({ lib }: { lib: UseClips }) {
   const stats = useMemo(() => {
     if (entries.length === 0) return null;
     let capped = 0;
+    let quiet = 0;
     let onTarget = 0;
     const moves: number[] = [];
     for (const e of entries) {
-      const g = gainDbFor(e, target, headroom, maxGain);
+      const g = gainDbFor(e, target, limits);
       if (g.capped) capped += 1;
+      if (g.quiet) quiet += 1;
       if (Math.abs(g.db) <= 1) onTarget += 1;
       moves.push(Math.abs(g.db));
     }
     moves.sort((a, b) => a - b);
-    return { capped, onTarget, typicalMove: moves[Math.floor(moves.length / 2)] };
-  }, [entries, target, headroom, maxGain]);
+    return { capped, quiet, onTarget, typicalMove: moves[Math.floor(moves.length / 2)] };
+  }, [entries, target, limits]);
 
   const histogram = useMemo(() => {
     const buckets = new Array(HIST_MAX - HIST_MIN + 1).fill(0) as number[];
@@ -140,9 +162,9 @@ export default function LoudnessSection({ lib }: { lib: UseClips }) {
     (name: string) => {
       const e = entries.find((x) => x.name === name);
       if (!e || compareOriginal) return 1;
-      return Math.pow(10, gainDbFor(e, target, headroom, maxGain).db / 20);
+      return Math.pow(10, gainDbFor(e, target, limits).db / 20);
     },
-    [entries, compareOriginal, target, headroom, maxGain],
+    [entries, compareOriginal, target, limits],
   );
 
   // target drag or A/B flip retunes the running preview without restarting it
@@ -189,6 +211,55 @@ export default function LoudnessSection({ lib }: { lib: UseClips }) {
     video.addEventListener("ended", onEnded);
     return () => video.removeEventListener("ended", onEnded);
   }, []);
+
+  // tracks: per-track matching and the ones matching never touches (match:false in trackPreferences.json)
+  const perTrack = settings.loudness?.perTrack ?? false;
+  const [trackNames, setTrackNames] = useState<string[]>([]);
+  const [leftAlone, setLeftAlone] = useState<Set<string>>(() => new Set());
+  const newest = useMemo(() => lib.clips.slice(0, TRACK_NAME_CLIPS).map((c) => c.originalName).join("\n"), [lib.clips]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const prefs = ((await window.clips.getTrackPreferences().catch(() => null)) ?? {}) as Record<
+        string,
+        { hidden?: boolean; match?: boolean }
+      >;
+      const names = new Set<string>();
+      const infos = await Promise.all(
+        newest
+          .split("\n")
+          .filter(Boolean)
+          .map((n) => window.clips.getClipInfo(n).catch(() => null)),
+      );
+      for (const info of infos) {
+        const tracks: { name?: string; ordinal: number }[] = Array.isArray(info?.audioTracks) ? info.audioTracks : [];
+        if (tracks.length < 2) continue;
+        for (const t of tracks) names.add(t.name || `Track ${t.ordinal + 1}`);
+      }
+      for (const [name, pref] of Object.entries(prefs)) if (name !== PALETTE_KEY && pref?.match === false) names.add(name);
+      if (cancelled) return;
+      // hidden tracks (the Mix) never play in the mixer
+      const shown = [...names].filter((n) => !(prefs[n]?.hidden ?? n === "Mix"));
+      setTrackNames(shown);
+      setLeftAlone(new Set(shown.filter((n) => prefs[n]?.match === false)));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [newest]);
+
+  const toggleTrack = (name: string) => {
+    const alone = !leftAlone.has(name);
+    setLeftAlone((prev) => {
+      const next = new Set(prev);
+      if (alone) next.add(name);
+      else next.delete(name);
+      return next;
+    });
+    // null drops the key, matched is the default
+    void window.clips.saveTrackPreferences(name, { match: alone ? false : null }).catch(() => undefined);
+  };
 
   const chartW = 600;
   const chartH = 120;
@@ -300,6 +371,43 @@ export default function LoudnessSection({ lib }: { lib: UseClips }) {
             </div>
           </div>
 
+          {trackNames.length > 0 ? (
+            <div className="loud-tracks">
+              <div className="loud-target-row">
+                <div className="loud-target-info">
+                  <div className="set-row-title">Match tracks to each other</div>
+                  <div className="set-row-desc">
+                    Each track gets its own level, so a quiet voice chat comes up next to a loud game. Off, the whole clip moves as one.
+                  </div>
+                </div>
+                <Toggle
+                  checked={perTrack}
+                  disabled={!enabled}
+                  onChange={(v) => void set("loudness.perTrack", v)}
+                  aria-label="Match tracks to each other"
+                />
+              </div>
+              <div className="loud-track-pick">
+                <div className="set-row-desc">Tracks that get matched. Click one to leave it alone, like music you keep quiet on purpose.</div>
+                <div className="loud-track-chips">
+                  {trackNames.map((name) => (
+                    <button
+                      key={name}
+                      type="button"
+                      className={`loud-auto${leftAlone.has(name) ? "" : " on"}`}
+                      disabled={!enabled}
+                      aria-pressed={!leftAlone.has(name)}
+                      title={leftAlone.has(name) ? "Left alone" : "Matched"}
+                      onClick={() => toggleTrack(name)}
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : null}
+
           {stats ? (
             <div className="loud-stats">
               <span>
@@ -308,8 +416,11 @@ export default function LoudnessSection({ lib }: { lib: UseClips }) {
               <span>
                 <b>{Math.round((stats.onTarget / entries.length) * 100)}%</b> already within 1 dB
               </span>
-              <span title="Raising these all the way would clip their peaks, so they stop a little short">
+              <span title="Raising these all the way would clip their peaks or pass 200%, so they stop a little short">
                 <b>{stats.capped.toLocaleString()}</b> stay a bit quieter
+              </span>
+              <span title="Much quieter than the rest of your library, like menu music. These are never raised">
+                <b>{stats.quiet.toLocaleString()}</b> quiet on purpose
               </span>
             </div>
           ) : null}
@@ -333,7 +444,7 @@ export default function LoudnessSection({ lib }: { lib: UseClips }) {
             </div>
             <div className="loud-samples">
               {samples.map(({ key, label, entry }) => {
-                const g = gainDbFor(entry, target, headroom, maxGain);
+                const g = gainDbFor(entry, target, limits);
                 const thumb = lib.thumbnails.get(entry.name);
                 const isPlaying = playing === entry.name;
                 return (

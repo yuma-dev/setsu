@@ -46,7 +46,9 @@ const DEFAULT_SETTINGS = {
   // (<clips>/.clip_metadata/analysis_v1), indexed in loudness_v1.json
   loudness: {
     enabled: true,
-    targetLufs: null
+    targetLufs: null,
+    // each track gets its own gain instead of one for the clip
+    perTrack: false
   },
   // green lines + group styling for new clips
   showNewClipsIndicators: true,

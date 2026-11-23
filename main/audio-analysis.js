@@ -107,6 +107,19 @@ async function get(clipName) {
   return null;
 }
 
+/** the whole current sidecar, or null; no queueing */
+async function getEntry(clipName) {
+  const settings = await getSettings();
+  let stat;
+  try {
+    stat = await fs.stat(path.join(settings.clipLocation, clipName));
+  } catch (_) {
+    return null;
+  }
+  const entry = await readSidecar(sidecarPath(settings.clipLocation, clipName));
+  return isCurrent(entry, stat) ? entry : null;
+}
+
 function dbOf(linear) {
   if (linear <= 0) return SILENCE_DB;
   return Math.max(SILENCE_DB, Math.round(20 * Math.log10(linear) * 10) / 10);
@@ -448,4 +461,4 @@ async function remove(clipName) {
   if (loudness) await loudness.remove(clipName);
 }
 
-module.exports = { init, get, warm, enqueue, scanAll, resetAll, pause, resume, forget, remove, progressPayload, countAnalyzed, envelope, RATE };
+module.exports = { init, get, getEntry, warm, enqueue, scanAll, resetAll, pause, resume, forget, remove, progressPayload, countAnalyzed, envelope, RATE };

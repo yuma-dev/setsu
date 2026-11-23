@@ -5674,6 +5674,15 @@ body.ui-blur-exit .app-body {
   opacity: 0.4;
   cursor: default;
 }
+.loud-track-pick {
+  margin-top: 12px;
+}
+.loud-track-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
 .loud-stats {
   display: flex;
   flex-wrap: wrap;

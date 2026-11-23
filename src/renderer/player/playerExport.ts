@@ -138,14 +138,14 @@ interface SavedTrack {
  * persists: hidden by global pref (Mix hidden by default), per-clip mute and hand-set levels,
  * the matched gain on every other track unless the clip has its own master level. null for
  * single-track clips, where the master carries everything */
-async function savedMix(originalName: string, tracks: SavedTrack[], detail: { source: string; gain?: number }): Promise<unknown> {
+async function savedMix(originalName: string, tracks: SavedTrack[], detail: { source: string; gain?: number; trackGains?: Record<number, number> | null }): Promise<unknown> {
   if (tracks.length < 2) return null;
   const [state, prefs] = await Promise.all([
     window.clips.getTrackState(originalName).catch(() => null),
     window.clips.getTrackPreferences().catch(() => null),
   ]);
   const saved = (state?.tracks ?? {}) as Record<string, { volume?: number; muted?: boolean; custom?: boolean }>;
-  const global = (prefs ?? {}) as Record<string, { hidden?: boolean }>;
+  const global = (prefs ?? {}) as Record<string, { hidden?: boolean; match?: boolean }>;
   const matched = detail.source === "normalized" && Number.isFinite(detail.gain) ? (detail.gain as number) : null;
   return tracks
     .filter((t) => {
@@ -157,7 +157,11 @@ async function savedMix(originalName: string, tracks: SavedTrack[], detail: { so
       const s = saved[t.ordinal] ?? {};
       // same rule as the mixer: a saved 1 from before the custom flag counts as unset
       const custom = Number.isFinite(s.volume) && (s.custom === true || s.volume !== 1);
-      return { streamIndex: t.streamIndex, ordinal: t.ordinal, volume: custom ? (s.volume as number) : matched ?? 1 };
+      const name = t.name || `Track ${t.ordinal + 1}`;
+      // tracks left alone skip matching; a per-track gain wins over the clip gain
+      const own = detail.trackGains?.[t.ordinal];
+      const auto = matched == null || global[name]?.match === false ? 1 : Number.isFinite(own) ? (own as number) : matched;
+      return { streamIndex: t.streamIndex, ordinal: t.ordinal, volume: custom ? (s.volume as number) : auto };
     });
 }
 

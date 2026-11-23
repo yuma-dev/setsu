@@ -122,6 +122,8 @@ class AudioTracksManager {
     // loudness-matched gain for tracks without their own level; null when matching is off
     // or the clip has a custom master volume
     this.normalizedGain = Number.isFinite(persistedState?.normalizedGain) ? persistedState.normalizedGain : null;
+    // per-track matching: ordinal -> gain, tracks missing from it fall back to the clip gain
+    this.trackGains = persistedState?.trackGains || null;
 
     for (const meta of trackMetas) {
       // prefer a pre-warmed <audio> element from hover: already in DOM, past readyState>=2
@@ -152,12 +154,14 @@ class AudioTracksManager {
       const saved = persisted[meta.ordinal] || {};
       // a saved level of exactly 1 from before the custom flag existed counts as unset
       const custom = Number.isFinite(saved.volume) && (saved.custom === true || saved.volume !== 1);
-      const normalized = !custom && this.normalizedGain != null;
-      const trueVolume = custom ? saved.volume : (normalized ? this.normalizedGain : 1);
-      const volume = clamp(trueVolume, 0, 2);
-      const muted = !!saved.muted;
       const trackName = meta.name || `Track ${meta.ordinal + 1}`;
       const globalPref = prefs[trackName] || {};
+      // match:false means leave this track alone (music that is quiet on purpose)
+      const leftAlone = globalPref.match === false;
+      const normalized = !custom && !leftAlone && this.normalizedGain != null;
+      const trueVolume = custom ? saved.volume : (normalized ? this._matchedFor(meta.ordinal) : 1);
+      const volume = clamp(trueVolume, 0, 2);
+      const muted = !!saved.muted;
       // `hidden` = removed to the floating tray (global pref); `muted` = right-click soft
       // mute, per-clip. Either silences the track.
       const hidden = globalPref.hidden !== undefined ? !!globalPref.hidden : hiddenByDefault(trackName);
@@ -187,6 +191,7 @@ class AudioTracksManager {
         // custom: the user set this track's level, persisted and never overwritten by matching
         custom,
         normalized,
+        leftAlone,
         color,
         defaultColor
       });
@@ -434,6 +439,11 @@ class AudioTracksManager {
     this._emitChange();
   }
 
+  _matchedFor(ordinal) {
+    const own = this.trackGains ? this.trackGains[ordinal] : undefined;
+    return Number.isFinite(own) ? own : this.normalizedGain;
+  }
+
   /** marks a track as user-set; matching leaves it alone from now on */
   _setCustom(track) {
     if (track.custom && !track.normalized) return;
@@ -449,21 +459,23 @@ class AudioTracksManager {
   }
 
   /** right-click on the volume icon: every track back on the matched gain, hand-set levels dropped */
-  revertAllToMatched(gain) {
+  revertAllToMatched(gain, trackGains) {
     if (!Number.isFinite(gain)) return;
     for (const t of this.tracks) t.custom = false;
-    this.applyNormalizedGain(gain, true);
+    this.applyNormalizedGain(gain, true, trackGains);
     this._emitCustomState();
     this._schedulePersistClip();
   }
 
   /** new matched gain for every track without its own level (measurement landed, target changed) */
-  applyNormalizedGain(gain, ramp) {
-    if (!Number.isFinite(gain)) return;
-    this.normalizedGain = gain;
+  applyNormalizedGain(clipGain, ramp, trackGains) {
+    if (!Number.isFinite(clipGain)) return;
+    this.normalizedGain = clipGain;
+    if (trackGains !== undefined) this.trackGains = trackGains || null;
     const now = this.audioContext.currentTime;
     for (const t of this.tracks) {
-      if (t.custom) continue;
+      if (t.custom || t.leftAlone) continue;
+      const gain = this._matchedFor(t.ordinal);
       t.normalized = true;
       t._trueVolume = gain;
       t.volume = clamp(gain, 0, 2);
@@ -632,11 +644,12 @@ class AudioTracksManager {
     row.addEventListener('dblclick', (e) => {
       if (e.target.closest('.mixer__dot, .mixer__hide')) return;
       // back to the matched gain when matching is on, else unity
-      const reset = this.normalizedGain != null ? this.normalizedGain : 1;
+      const matched = this.normalizedGain != null && !track.leftAlone;
+      const reset = matched ? this._matchedFor(track.ordinal) : 1;
       track.volume = clamp(reset, 0, 2);
       track._trueVolume = reset;
       track.custom = false;
-      track.normalized = this.normalizedGain != null;
+      track.normalized = matched;
       this._emitCustomState();
       this._paintRow(track, els);
       if (!track.hidden && !track.muted) {

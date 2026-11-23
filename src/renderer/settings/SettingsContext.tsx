@@ -33,9 +33,10 @@ export type { CardGlowSettings };
 export interface LoudnessSettings {
   enabled: boolean;
   targetLufs: number | null;
+  perTrack: boolean;
 }
 
-export const LOUDNESS_DEFAULTS: LoudnessSettings = { enabled: true, targetLufs: null };
+export const LOUDNESS_DEFAULTS: LoudnessSettings = { enabled: true, targetLufs: null, perTrack: false };
 
 export interface AppSettings {
   enableDiscordRPC: boolean;

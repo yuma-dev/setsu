@@ -624,11 +624,11 @@ function markVolumeCustom() {
 }
 
 /** apply a matched gain to whatever is playing: the master node, or each unset track on a multi-track clip */
-function applyMatchedGain(gain, ramp) {
+function applyMatchedGain(gain, ramp, trackGains) {
   if (!state.audioContext) setupAudioContext();
   const now = state.audioContext.currentTime;
   if (activeAudioTracksManager) {
-    activeAudioTracksManager.applyNormalizedGain(gain, ramp);
+    activeAudioTracksManager.applyNormalizedGain(gain, ramp, trackGains);
     return;
   }
   const param = state.gainNode.gain;
@@ -653,7 +653,7 @@ async function revertToMatchedVolume() {
     const detail = await ipcRenderer.invoke('reset-volume', clipName);
     if (!state.currentClip || state.currentClip.originalName !== clipName) return;
     // on a multi-track clip the hand-set levels live on the tracks, so those go too
-    if (detail.source === 'normalized' && activeAudioTracksManager) activeAudioTracksManager.revertAllToMatched(detail.gain);
+    if (detail.source === 'normalized' && activeAudioTracksManager) activeAudioTracksManager.revertAllToMatched(detail.gain, detail.trackGains);
     else if (detail.source === 'normalized') applyMatchedGain(detail.gain, true);
     else applyMatchedGain(1, true);
     setVolumeSource(detail);
@@ -667,7 +667,7 @@ async function revertToMatchedVolume() {
 function onLoudnessMeasured(payload) {
   if (!payload || !state.currentClip || state.currentClip.originalName !== payload.clipName) return;
   if (volumeSource.source === 'custom' || !loudnessEnabled()) return;
-  applyMatchedGain(payload.gain, true);
+  applyMatchedGain(payload.gain, true, payload.trackGains);
   setVolumeSource({ source: 'normalized', gainDb: payload.gainDb });
 }
 
@@ -2119,7 +2119,7 @@ async function openClip(originalName, customName) {
             }
           });
           const persistedWithGain = matchedOnTracks
-            ? { ...(persisted || {}), normalizedGain: volumeDetail.gain }
+            ? { ...(persisted || {}), normalizedGain: volumeDetail.gain, trackGains: volumeDetail.trackGains || null }
             : persisted;
           await manager.init(trackMetas, persistedWithGain, globalPrefs, warm ? warm.audioEls : null);
           if (openGen !== clipOpenGeneration) {

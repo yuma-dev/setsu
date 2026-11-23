@@ -20,6 +20,15 @@ const INDEX_VERSION = 3;
 const HEADROOM_DBTP = -1;
 const SAMPLE_PEAK_MARGIN_DB = 1;
 const MAX_GAIN_DB = 12;
+// boosts stop at 2x, the top of the volume slider and the mixer rows; cuts keep the full 12 dB
+const MAX_BOOST_DB = 6;
+// a clip this far under the library is quiet on purpose (menu music, a calm moment): it can be
+// lowered but never raised
+const QUIET_LUFS = -38;
+const QUIET_BELOW_MEDIAN_LU = 6;
+// envelope rms of the mono downmix reads about 1 dB hot against ebur128 on 40 mix tracks
+const ENVELOPE_TO_LUFS_DB = -1;
+const ENVELOPE_GATE_DB = -70;
 // ebur128 reports -70 for digital silence; at or under this a clip has nothing to match, and
 // boosting whatever noise floor it has by the full 12 dB helps nobody
 const SILENT_LUFS = -60;
@@ -32,6 +41,8 @@ const SAVE_MAX_WAIT_MS = 10000;
 let getSettings = null;
 let analysis = null;
 let send = null;
+// clipName -> ordinals the mixer never matches: hidden tracks (the Mix) and ones left alone
+let getSkippedTracks = null;
 
 // { location, clips: { [name]: { v, av, mtimeMs, size, lufs, peak, mode } } }; av is the analysis
 // sidecar version the entry came from
@@ -45,6 +56,7 @@ function init(deps) {
   getSettings = deps.getSettings;
   analysis = deps.analysis;
   send = deps.send;
+  getSkippedTracks = deps.getSkippedTracks || null;
 }
 
 function isEnabled(settings) {
@@ -160,8 +172,9 @@ async function record(clipName, entry, fresh) {
   if (!fresh || !send) return;
   const settings = await getSettings();
   if (!isEnabled(settings)) return;
-  const { gain, gainDb } = gainFromEntry(idx.clips[clipName], targetFor(settings));
-  send('loudness-measured', { clipName, gain, gainDb, lufs: idx.clips[clipName].lufs });
+  const { gain, gainDb, quiet } = gainFromEntry(idx.clips[clipName], targetFor(settings));
+  const trackGains = await trackGainsFor(clipName, settings, entry, quiet);
+  send('loudness-measured', { clipName, gain, gainDb, lufs: idx.clips[clipName].lufs, trackGains });
 }
 
 function targetFor(settings) {
@@ -183,19 +196,87 @@ function libraryMedian() {
   return medianCache;
 }
 
-/** gain for one measured entry at a target; capped by true peak headroom and +-MAX_GAIN_DB */
-function gainFromEntry(entry, targetLufs) {
+function quietLimit() {
+  const median = libraryMedian();
+  return Number.isFinite(median) ? Math.min(QUIET_LUFS, median - QUIET_BELOW_MEDIAN_LU) : QUIET_LUFS;
+}
+
+/** gain for one measured entry at a target; capped by peak headroom, +MAX_BOOST_DB and -MAX_GAIN_DB.
+ * quiet clips are never raised; tracks skip that rule, leaving one alone is the user's call */
+function gainFromEntry(entry, targetLufs, isTrack = false) {
   if (!entry || !audible(entry.lufs)) return { gain: 1, gainDb: 0, capped: false, silent: true };
   const wanted = targetLufs - entry.lufs;
   let gainDb = wanted;
   if (Number.isFinite(entry.peak)) gainDb = Math.min(gainDb, HEADROOM_DBTP - SAMPLE_PEAK_MARGIN_DB - entry.peak);
-  gainDb = Math.max(-MAX_GAIN_DB, Math.min(MAX_GAIN_DB, gainDb));
-  return { gain: Math.pow(10, gainDb / 20), gainDb, capped: gainDb < wanted - 0.05, silent: false };
+  gainDb = Math.max(-MAX_GAIN_DB, Math.min(MAX_BOOST_DB, gainDb));
+  const quiet = !isTrack && entry.lufs < quietLimit();
+  if (quiet) gainDb = Math.min(gainDb, 0);
+  return { gain: Math.pow(10, gainDb / 20), gainDb, capped: !quiet && gainDb < wanted - 0.05, silent: false, quiet };
+}
+
+/** loudness of one envelope track, LUFS-ish: mean power of its 100 ms windows, gated like
+ * BS.1770 (absolute, then 10 dB under the mean) */
+function envelopeLufs(rms) {
+  if (!Array.isArray(rms) || rms.length === 0) return NaN;
+  let sum = 0;
+  let n = 0;
+  const powers = [];
+  for (const db of rms) {
+    if (!(db > ENVELOPE_GATE_DB)) continue;
+    const p = Math.pow(10, db / 10);
+    powers.push(p);
+    sum += p;
+    n += 1;
+  }
+  if (n === 0) return NaN;
+  const gate = (sum / n) / 10;
+  sum = 0;
+  n = 0;
+  for (const p of powers) {
+    if (p <= gate) continue;
+    sum += p;
+    n += 1;
+  }
+  return n ? 10 * Math.log10(sum / n) + ENVELOPE_TO_LUFS_DB : NaN;
+}
+
+/** per-track gains from a sidecar, ordinal -> linear gain. every audible track is pulled to the
+ * same level, set so their sum lands near the target; silent and skipped tracks are left out.
+ * cutOnly is for a clip that is quiet on purpose: its tracks may come down, never up */
+function trackGainsFromSidecar(sidecar, targetLufs, skipped, cutOnly) {
+  const tracks = Array.isArray(sidecar?.tracks) ? sidecar.tracks : [];
+  if (tracks.length < 2) return null;
+  const measured = [];
+  for (const t of tracks) {
+    if (skipped && skipped.has(t.ordinal)) continue;
+    const lufs = envelopeLufs(t.rms);
+    if (!audible(lufs)) continue;
+    let peak = -Infinity;
+    for (const db of t.peak || []) if (db > peak) peak = db;
+    measured.push({ ordinal: t.ordinal, lufs, peak: Number.isFinite(peak) ? peak : null });
+  }
+  if (measured.length === 0) return null;
+  // uncorrelated tracks add in power, so n tracks at the same level sit 10 log n above one
+  const each = targetLufs - 10 * Math.log10(Math.max(1, measured.length));
+  const out = {};
+  for (const m of measured) {
+    const gain = gainFromEntry(m, each, true).gain;
+    out[m.ordinal] = cutOnly ? Math.min(1, gain) : gain;
+  }
+  return out;
+}
+
+async function trackGainsFor(clipName, settings, sidecar, cutOnly) {
+  if (!settings?.loudness?.perTrack || !analysis) return null;
+  const entry = sidecar || await analysis.getEntry(clipName).catch(() => null);
+  const skipped = getSkippedTracks ? await getSkippedTracks(clipName).catch(() => null) : null;
+  return trackGainsFromSidecar(entry, targetFor(settings), skipped, cutOnly);
 }
 
 /**
  * Effective volume for a clip. rawVolume is the .volume file value (1 when absent).
- * @returns {{volume:number, source:'custom'|'normalized'|'default', gain?:number, gainDb?:number, lufs?:number, capped?:boolean, measured:boolean}}
+ * trackGains (ordinal -> gain) is set when per-track matching is on.
+ * @returns {{volume:number, source:'custom'|'normalized'|'default', gain?:number, gainDb?:number, lufs?:number, capped?:boolean, measured:boolean, trackGains?:Object|null}}
  */
 async function resolveVolume(clipName, rawVolume) {
   const raw = Number(rawVolume);
@@ -208,9 +289,10 @@ async function resolveVolume(clipName, rawVolume) {
     // the open-state batch already asks the analysis for this clip; nothing more to queue
     return { volume: 1, source: 'default', measured: false };
   }
-  const { gain, gainDb, capped, silent } = gainFromEntry(entry, targetFor(settings));
+  const { gain, gainDb, capped, silent, quiet } = gainFromEntry(entry, targetFor(settings));
   if (silent) return { volume: 1, source: 'default', measured: true };
-  return { volume: gain, source: 'normalized', gain, gainDb, lufs: entry.lufs, capped, measured: true };
+  const trackGains = await trackGainsFor(clipName, settings, null, quiet);
+  return { volume: gain, source: 'normalized', gain, gainDb, lufs: entry.lufs, capped, measured: true, trackGains };
 }
 
 async function remove(clipName) {
@@ -249,6 +331,8 @@ async function getSummary() {
     // what the page mirrors in its gain math: the sample peak cap including the margin
     headroomDbtp: HEADROOM_DBTP - SAMPLE_PEAK_MARGIN_DB,
     maxGainDb: MAX_GAIN_DB,
+    maxBoostDb: MAX_BOOST_DB,
+    quietLufs: quietLimit(),
     measured: Object.keys(idx.clips).length,
     entries,
     scan: analysis ? analysis.progressPayload() : { running: false, paused: false, pending: 0, total: 0, done: 0, etaSeconds: null }
