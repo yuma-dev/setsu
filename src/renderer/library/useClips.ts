@@ -139,10 +139,15 @@ export function useClips(): UseClips {
       setLoading(false);
       requestAnimationFrame(() => bootMark("fresh_list_committed"));
 
+      const liveNames = new Set(list.map((c) => c.originalName));
       // a clip lands live: fetch its info, mark new, prepend (dedup), fill in thumbnail + tags
       unsubs.push(
         window.clips.onNewClipAdded(async (fileName: string) => {
           if (!fileName || cancelled) return;
+          // a watcher rescan can name clips the grid already has; redoing info, tags and
+          // thumbnail for those is what flooded main at launch
+          if (liveNames.has(fileName)) return;
+          liveNames.add(fileName);
           const info = (await window.clips.getNewClipInfo(fileName).catch(() => null)) as Record<
             string,
             unknown

@@ -213,6 +213,13 @@ const analysisModule = require('./main/audio-analysis');
 const storageModule = require('./main/storage');
 // Library order (newest first) from the last get-clips, for the warmer.
 let lastClipNames = [];
+// watcher overflow rescans, see scheduleOverflowRescan
+const OVERFLOW_RESCAN_DELAY_MS = 2000;
+let clipListLoaded = false;
+let overflowBeforeList = false;
+let overflowRescanTimer = null;
+let overflowRescanRunning = false;
+let overflowRescanAgain = false;
 
 // lazy: discord-rpc is heavy, not needed to open the window
 const discordModule = lazyModule('./main/discord');
@@ -345,7 +352,7 @@ async function runDeferredServices() {
   // resumes the one-time library listen; no-op once every clip has its sidecar
   if (!skip.has('warm')) setTimeout(() => {
     analysisModule.scanAll().catch((error) => logger.warn(`analysis scan failed: ${error.message}`));
-  }, 8000);
+  }, 1500);
   // overlapping saves, after the listen has had a head start (its sidecars carry durations)
   if (!skip.has('warm')) storageModule.start(20000);
 }
@@ -1241,16 +1248,7 @@ async function createWindow() {
     },
     // the single recursive watch has one change buffer; on overflow, walk the library and announce
     // anything not yet known.
-    onOverflow: async () => {
-      const known = new Set(lastClipNames);
-      const clips = await clipsModule.getClips(getSettings);
-      const names = Array.isArray(clips) ? clips.map((c) => c.originalName) : [];
-      lastClipNames = names;
-      if (!mainWindow || mainWindow.isDestroyed()) return;
-      for (const name of names) {
-        if (!known.has(name)) mainWindow.webContents.send('new-clip-added', name);
-      }
-    }
+    onOverflow: () => scheduleOverflowRescan()
   });
   if (benchmarkHarness) benchmarkHarness.endStartup('fileWatcherSetup');
 
@@ -1530,8 +1528,55 @@ ipcMain.handle("get-clips", async () => {
   const clips = await clipsModule.getClips(getSettings);
   bootTrace.mark('get_clips_resolved');
   lastClipNames = Array.isArray(clips) ? clips.map((c) => c.originalName) : [];
+  clipListLoaded = true;
+  if (overflowBeforeList) {
+    overflowBeforeList = false;
+    scheduleOverflowRescan();
+  }
   return clips;
 });
+
+/**
+ * Watcher overflow: walk the library and announce what is not known yet. Reading .clip_metadata
+ * in bulk overflows the watch buffer by itself (last-access changes, 17 overflows for 7,648
+ * reads), several times per launch, so rescans are coalesced and run one at a time. Before the
+ * first get-clips nothing is known and every clip would count as new; that one waits for the list.
+ */
+function scheduleOverflowRescan() {
+  if (!clipListLoaded) {
+    overflowBeforeList = true;
+    return;
+  }
+  if (overflowRescanRunning) {
+    overflowRescanAgain = true;
+    return;
+  }
+  if (overflowRescanTimer) return;
+  overflowRescanTimer = setTimeout(() => {
+    overflowRescanTimer = null;
+    overflowRescanRunning = true;
+    runOverflowRescan()
+      .catch((error) => logger.warn(`Watcher rescan failed: ${error.message}`))
+      .finally(() => {
+        overflowRescanRunning = false;
+        if (overflowRescanAgain) {
+          overflowRescanAgain = false;
+          scheduleOverflowRescan();
+        }
+      });
+  }, OVERFLOW_RESCAN_DELAY_MS);
+}
+
+async function runOverflowRescan() {
+  const clips = await clipsModule.getClips(getSettings);
+  const names = Array.isArray(clips) ? clips.map((c) => c.originalName) : [];
+  const known = new Set(lastClipNames);
+  lastClipNames = names;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  for (const name of names) {
+    if (!known.has(name)) mainWindow.webContents.send('new-clip-added', name);
+  }
+}
 
 ipcMain.handle('get-app-version', () => {
   return app.getVersion();
