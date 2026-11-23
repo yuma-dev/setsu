@@ -4,7 +4,9 @@ const fs = require('fs').promises;
 const crypto = require('crypto');
 const logger = require('../utils/logger');
 const telemetry = require('./telemetry');
+const { execFile } = require('child_process');
 const { ffmpeg, ffprobeAsync } = require('./ffmpeg');
+const { ffmpegPath } = require('./ffmpeg-binaries');
 const { mapLimit } = require('../utils/pool');
 
 // Concurrent thumbnail validations (fs.access + two small reads each).
@@ -24,6 +26,39 @@ let completedThumbnails = 0;
 // Count of ffmpeg children currently spawned for thumbnail generation. Nothing
 // kills them, so stopQueue can at least report how many it orphaned.
 let inFlightGenerations = 0;
+
+// clipName -> promise of the running generation; a second request for the same clip rides along
+const generating = new Map();
+
+function runGrab(args) {
+  return new Promise((resolve, reject) => {
+    execFile(ffmpegPath, args, { windowsHide: true, maxBuffer: 1024 * 1024 }, (error, _stdout, stderr) => {
+      if (error) reject(new Error(`ffmpeg exited with code ${error.code}: ${String(stderr || error.message).trim().slice(-300)}`));
+      else resolve();
+    });
+  });
+}
+
+/**
+ * One 640x360 jpeg. Default is the keyframe at or before startTime on one thread, 0.14 s of
+ * cpu on a 1080p60 av1 clip against 1.45 s for an exact seek with every decoder thread. exact
+ * is for a trim start, where the frame is the one the user picked.
+ */
+async function grabFrame(clipPath, startTime, thumbnailPath, exact = false) {
+  const head = ['-hide_banner', '-loglevel', 'error', '-threads', '1', '-ss', String(Math.max(0, Number(startTime) || 0))];
+  const tail = ['-an', '-i', clipPath, '-y', '-vf', 'scale=640:360:flags=fast_bilinear', '-frames:v', '1', thumbnailPath];
+  if (!exact) {
+    try {
+      await fs.rm(thumbnailPath, { force: true });
+      await runGrab([...head, '-noaccurate_seek', '-skip_frame', 'nokey', ...tail]);
+      // no keyframe left after the seek point exits 0 without a file
+      await fs.access(thumbnailPath);
+      return;
+    } catch (_) { /* exact seek below */ }
+  }
+  await runGrab([...head, ...tail]);
+  await fs.access(thumbnailPath);
+}
 
 /**
  * @param {Error} error
@@ -174,17 +209,7 @@ async function processQueue(getSettings, getTrimData) {
             const startTime = trimData ? trimData.start : (duration > 40 ? duration / 2 : 0);
 
             stage = 'screenshot';
-            await new Promise((resolve, reject) => {
-              ffmpeg(clipPath)
-                .screenshots({
-                  timestamps: [startTime],
-                  filename: path.basename(thumbnailPath),
-                  folder: path.dirname(thumbnailPath),
-                  size: '640x360'
-                })
-                .on('end', resolve)
-                .on('error', reject);
-            });
+            await grabFrame(clipPath, startTime, thumbnailPath, !!trimData);
 
             stage = 'meta_write';
             await saveThumbnailMetadata(thumbnailPath, {
@@ -200,6 +225,9 @@ async function processQueue(getSettings, getTrimData) {
               unit: 'ms',
               dims: { stage: 'queued' }
             });
+            // progress only carries the count; without this a card past the fast path kept its
+            // placeholder until the next launch
+            event.sender.send('thumbnail-generated', { clipName, thumbnailPath });
           }
 
           completedThumbnails++;
@@ -280,8 +308,13 @@ async function handleInitialThumbnails(clipNames, event, getSettings, getTrimDat
     })
   );
 
-  const clipsNeedingGeneration = missingThumbnails.filter(Boolean);
+  // a clip already being generated announces itself when it lands; asking again only forks more ffmpeg
+  const clipsNeedingGeneration = missingThumbnails.filter((name) => name && !generating.has(name));
+  let release = () => {};
+  const claim = new Promise((resolve) => { release = resolve; });
+  for (const name of clipsNeedingGeneration) generating.set(name, claim);
 
+  try {
   if (clipsNeedingGeneration.length > 0) {
     logger.info(`Fast-tracking thumbnail generation for ${clipsNeedingGeneration.length} initial clips`);
 
@@ -291,7 +324,7 @@ async function handleInitialThumbnails(clipNames, event, getSettings, getTrimDat
         try {
           const trimData = await getTrimData(clipName);
           if (trimData) {
-            return { clipName, startTime: trimData.start };
+            return { clipName, startTime: trimData.start, exact: true };
           }
 
           const info = await new Promise((resolve, reject) => {
@@ -332,7 +365,7 @@ async function handleInitialThumbnails(clipNames, event, getSettings, getTrimDat
     }
 
     await Promise.all(
-      validClipData.map(async ({ clipName, startTime, duration }) => {
+      validClipData.map(async ({ clipName, startTime, duration, exact }) => {
         const clipPath = path.join(settings.clipLocation, clipName);
         const thumbnailPath = generateThumbnailPath(clipPath);
         const startedAtMs = Date.now();
@@ -341,17 +374,7 @@ async function handleInitialThumbnails(clipNames, event, getSettings, getTrimDat
         try {
           inFlightGenerations++;
           counted = true;
-          await new Promise((resolve, reject) => {
-            ffmpeg(clipPath)
-              .screenshots({
-                timestamps: [startTime],
-                filename: path.basename(thumbnailPath),
-                folder: path.dirname(thumbnailPath),
-                size: '640x360'
-              })
-              .on('end', resolve)
-              .on('error', reject);
-          });
+          await grabFrame(clipPath, startTime, thumbnailPath, !!exact);
 
           await saveThumbnailMetadata(thumbnailPath, {
             startTime,
@@ -382,6 +405,11 @@ async function handleInitialThumbnails(clipNames, event, getSettings, getTrimDat
         }
       })
     );
+  }
+
+  } finally {
+    for (const name of clipsNeedingGeneration) generating.delete(name);
+    release();
   }
 
   return {
@@ -470,24 +498,14 @@ async function generateThumbnail(clipName, getSettings) {
     return thumbnailPath;
   } catch (error) {
     logger.info(`Generating new thumbnail for ${clipName}`);
-    return new Promise((resolve, reject) => {
-      ffmpeg(clipPath)
-        .screenshots({
-          count: 1,
-          timemarks: ['00:00:00'],
-          folder: path.dirname(thumbnailPath),
-          filename: path.basename(thumbnailPath),
-          size: '640x360',
-        })
-        .on('end', () => {
-          logger.info(`Thumbnail generated successfully for ${clipName}`);
-          resolve(thumbnailPath);
-        })
-        .on('error', (err) => {
-          logger.error(`Error generating thumbnail for ${clipName}:`, err);
-          reject(err);
-        });
-    });
+    try {
+      await grabFrame(clipPath, 0, thumbnailPath);
+      logger.info(`Thumbnail generated successfully for ${clipName}`);
+      return thumbnailPath;
+    } catch (err) {
+      logger.error(`Error generating thumbnail for ${clipName}:`, err);
+      throw err;
+    }
   }
 }
 
@@ -497,17 +515,7 @@ async function regenerateThumbnailForTrim(clipName, startTime, getSettings) {
   const thumbnailPath = generateThumbnailPath(clipPath);
 
   try {
-    await new Promise((resolve, reject) => {
-      ffmpeg(clipPath)
-        .screenshots({
-          timestamps: [startTime],
-          filename: path.basename(thumbnailPath),
-          folder: path.dirname(thumbnailPath),
-          size: '640x360'
-        })
-        .on('end', resolve)
-        .on('error', reject);
-    });
+    await grabFrame(clipPath, startTime, thumbnailPath, true);
 
     await saveThumbnailMetadata(thumbnailPath, {
       startTime,
