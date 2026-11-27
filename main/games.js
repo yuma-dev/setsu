@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs').promises;
 const logger = require('../utils/logger');
 const metadata = require('./metadata');
+const libraryWorker = require('./library-worker');
 
 const MAX_RESULTS = 30;
 
@@ -118,50 +119,12 @@ function pickPublic(g) {
  */
 async function getLibraryGames(clipNames, getSettings) {
   const settings = await getSettings();
-  const metadataFolder = metadata.getMetadataFolder(settings.clipLocation);
-  const names = Array.isArray(clipNames) ? clipNames : [];
-  const games = new Map();
-  const byClip = {};
-
-  let next = 0;
-  const worker = async () => {
-    while (next < names.length) {
-      const clipName = names[next++];
-      const file = path.join(metadataFolder, `${metadata.metadataSafeName(clipName)}.gameinfo`);
-      let info;
-      try {
-        info = JSON.parse(await fs.readFile(file, 'utf8'));
-      } catch {
-        continue;
-      }
-      const game = metadata.normalizeGame(info.game);
-      if (!game) continue;
-      byClip[clipName] = game.id;
-      let g = games.get(game.id);
-      if (!g) {
-        g = { id: game.id, name: game.name, icon_url: game.icon_url, iconPath: null, count: 0 };
-        games.set(game.id, g);
-      }
-      g.count += 1;
-      if (!g.icon_url && game.icon_url) g.icon_url = game.icon_url;
-      if (!g.iconPath && typeof info.icon_file === 'string' && info.icon_file) {
-        g.iconPath = path.join(settings.clipLocation, 'icons', info.icon_file);
-      }
-    }
-  };
-  await Promise.all(Array.from({ length: 16 }, worker));
-
-  // a local exe icon only stands in when there's no Discord art, check it exists once per game
-  await Promise.all(
-    [...games.values()].map(async (g) => {
-      if (g.icon_url || !g.iconPath) return;
-      const ok = await fs.access(g.iconPath).then(() => true, () => false);
-      if (!ok) g.iconPath = null;
-    })
-  );
-
-  const list = [...games.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
-  return { games: list, byClip };
+  // every clip's .gameinfo at launch, read in the library worker
+  return libraryWorker.run('libraryGames', {
+    clipLocation: settings.clipLocation,
+    metadataFolder: metadata.getMetadataFolder(settings.clipLocation),
+    names: Array.isArray(clipNames) ? clipNames : []
+  });
 }
 
 /**

@@ -15,6 +15,7 @@ const os = require('os');
 const path = require('path');
 const logger = require('../utils/logger');
 const telemetry = require('./telemetry');
+const clipHealth = require('./clip-health');
 
 const { ffmpegPath } = require('./ffmpeg-binaries');
 
@@ -218,6 +219,7 @@ async function measure(clipName, lowPriority) {
   const stat = await fs.stat(clipPath);
   const existing = await readSidecar(file);
   if (isCurrent(existing, stat)) return { entry: existing, fresh: false };
+  if (await clipHealth.isKnownUnreadable(clipPath)) throw Object.assign(new Error('unreadable clip'), { code: 'UNREADABLE' });
 
   const info = await getClipInfo(clipName);
   const tracks = Array.isArray(info?.audioTracks) ? info.audioTracks : [];
@@ -370,7 +372,8 @@ async function worker() {
         if (loudness) await loudness.record(clipName, entry, fresh);
         if (send) send('analysis-ready', { clipName, waveform: waveformOf(entry) });
       } catch (error) {
-        if (error?.code !== 'ENOENT') {
+        // UNREADABLE: the thumbnail queue already reported that file, once
+        if (error?.code !== 'ENOENT' && error?.code !== 'UNREADABLE') {
           logger.warn(`[analysis] failed for ${clipName}: ${error.message}`);
           telemetry.event('analysis_failed', {
             kind: telemetry.KIND.DEGRADED,

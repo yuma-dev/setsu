@@ -61,7 +61,8 @@ function mark(name, at) {
   if (!enabled || marks[name] !== undefined) return;
   marks[name] = typeof at === 'number' && Number.isFinite(at) ? at : Date.now();
   scheduleWrite();
-  if (name === 'renderer_ready' && cpuProfileWanted) setTimeout(stopCpuProfile, 3000);
+  // CLIPLIB_CPU_PROFILE_MS reaches past the reveal, into the deferred services
+  if (name === 'renderer_ready' && cpuProfileWanted) setTimeout(stopCpuProfile, Number(process.env.CLIPLIB_CPU_PROFILE_MS) || 3000);
   if (name === 'renderer_ready' && contentTraceWanted) {
     clearTimeout(contentTraceTimer);
     contentTraceTimer = setTimeout(stopContentTrace, Number(process.env.CLIPLIB_TRACE_STOP_MS) || 4000);

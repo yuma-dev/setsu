@@ -11,6 +11,7 @@ const VIDEO_EXTENSIONS = new Set(['.mp4', '.avi', '.mov', '.mkv', '.webm']);
 // clip counts as finished once size hasn't changed for this long
 const STABILITY_MS = 2000;
 const POLL_MS = 250;
+const LOCKED_POLL_MS = 1000;
 // restart after a watcher error: 5s doubling to 5min, a removed drive or dropped share comes back eventually
 const RESTART_BASE_MS = 5000;
 const RESTART_MAX_MS = 5 * 60 * 1000;
@@ -60,11 +61,28 @@ function poll(filePath) {
     }
     // a recording written straight into the library keeps growing; announce only once it stops
     if (now - entry.stableSince >= STABILITY_MS) {
-      pending.delete(filePath);
-      announce(filePath);
+      // an explorer copy has its final size from the first byte, the write lock is what tells
+      isWriteLocked(filePath, (locked) => {
+        if (!pending.has(filePath)) return;
+        if (locked) {
+          entry.timer = setTimeout(() => poll(filePath), LOCKED_POLL_MS);
+          return;
+        }
+        pending.delete(filePath);
+        announce(filePath);
+      });
       return;
     }
     entry.timer = setTimeout(() => poll(filePath), POLL_MS);
+  });
+}
+
+// EBUSY on a write open = another process holds it without write sharing (copy still running).
+// opening without writing leaves the mtime alone
+function isWriteLocked(filePath, done) {
+  fs.open(filePath, 'r+', (error, fd) => {
+    if (error) return done(error.code === 'EBUSY');
+    fs.close(fd, () => done(false));
   });
 }
 

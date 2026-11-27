@@ -6,6 +6,9 @@ const logger = require('../utils/logger');
 const telemetry = require('./telemetry');
 const { logActivity } = require('../utils/activity-tracker');
 const trackPalette = require('./track-palette');
+const { readFileRetry } = require('./read-retry');
+const libraryFs = require('./library-fs');
+const libraryWorker = require('./library-worker');
 
 // file utilities
 
@@ -122,9 +125,7 @@ function getMetadataFolder(clipLocation) {
 
 // flat filename key for .clip_metadata/: e.g. highlights/gameplay.mp4 becomes
 // highlights--gameplay.mp4; root clips pass through unchanged
-function metadataSafeName(clipName) {
-  return clipName.replace(/\//g, '--');
-}
+const { metadataSafeName, normalizeGame } = libraryFs;
 
 // custom name
 
@@ -475,14 +476,17 @@ async function getClipTags(clipName, getSettings) {
 
   let tagsData;
   try {
-    tagsData = await fs.readFile(tagsFilePath, 'utf8');
+    tagsData = await readFileRetry(tagsFilePath);
     return JSON.parse(tagsData);
   } catch (error) {
     if (error.code === 'ENOENT') {
       return [];
     }
     logger.error('Error reading tags:', error);
-    // Returning [] means the next save persists an empty tag list over the file.
+    // a read that failed (EMFILE at launch) says nothing about the file, so it must not come back
+    // as [] or the next tag edit writes the empty list over it
+    if (tagsData === undefined) throw error;
+    // unparseable: returning [] means the next save persists an empty tag list over the file.
     // Counts only here: tag text never leaves the machine.
     telemetry.event('tags_lost_on_parse', {
       kind: telemetry.KIND.DATA_LOSS,
@@ -519,38 +523,36 @@ async function mapWithConcurrency(items, limit, mapper) {
 /**
  * @param {string[]} clipNames
  * @param {Function} getSettings
- * @returns {Promise<Object<string, string[]>>} clipName to tags (missing file: empty array)
+ * @returns {Promise<Object<string, string[]>>} clipName to tags (missing file: empty array,
+ *   unreadable file: no entry)
  */
 async function getClipTagsBatch(clipNames, getSettings) {
   const settings = await getSettings();
-  const metadataFolder = getMetadataFolder(settings.clipLocation);
   const names = Array.isArray(clipNames) ? clipNames : [];
-
-  const entries = await mapWithConcurrency(names, 32, async (clipName) => {
-    const tagsFilePath = path.join(metadataFolder, `${metadataSafeName(clipName)}.tags`);
-    let tagsData;
-    try {
-      tagsData = await fs.readFile(tagsFilePath, 'utf8');
-      const parsed = JSON.parse(tagsData);
-      return [clipName, Array.isArray(parsed) ? parsed : []];
-    } catch (error) {
-      if (error.code !== 'ENOENT') {
-        logger.error('Error reading tags:', error);
-        // same loss as single-clip path; coalesced to one event per bad batch
-        telemetry.event('tags_lost_on_parse', {
-          kind: telemetry.KIND.DATA_LOSS,
-          severity: telemetry.SEVERITY.ERROR,
-          context: {
-            file_bytes: tagsData !== undefined ? Buffer.byteLength(tagsData, 'utf8') : undefined,
-            errno: error.code,
-            batch_size: names.length
-          }
-        });
-      }
-      return [clipName, []];
-    }
+  // the whole library in batches of 500 at launch, read in the library worker
+  const { byName, unreadable, corrupt } = await libraryWorker.run('readTags', {
+    metadataFolder: getMetadataFolder(settings.clipLocation),
+    names
   });
-  return Object.fromEntries(entries);
+  for (const { file_bytes, errno } of corrupt) {
+    logger.error(`Error parsing tags (${file_bytes} bytes)`);
+    // same loss as single-clip path
+    telemetry.event('tags_lost_on_parse', {
+      kind: telemetry.KIND.DATA_LOSS,
+      severity: telemetry.SEVERITY.ERROR,
+      context: { file_bytes, errno, batch_size: names.length }
+    });
+  }
+  if (unreadable.count > 0) {
+    // left out of the result, the renderer keeps the tags it already shows
+    logger.error(`Could not read tags for ${unreadable.count} clip(s) (${unreadable.errno})`);
+    telemetry.event('tags_read_failed', {
+      kind: telemetry.KIND.DEGRADED,
+      severity: telemetry.SEVERITY.WARNING,
+      context: { count: unreadable.count, errno: unreadable.errno, batch_size: names.length }
+    });
+  }
+  return byName;
 }
 
 async function saveClipTags(clipName, tags, getSettings) {
@@ -863,23 +865,6 @@ async function getGameIcon(clipName, getSettings) {
   }
 
   return response;
-}
-
-/**
- * the `game` block clipdip writes on save, the library backfill or a manual pick writes later.
- * `false` means picked as not a game
- * @param {any} raw
- * @returns {{id: string, name: string, steam_appid: string|null, icon_url: string|null}|null}
- */
-function normalizeGame(raw) {
-  if (!raw || typeof raw !== 'object' || typeof raw.id !== 'string' || typeof raw.name !== 'string') return null;
-  if (!raw.id || !raw.name) return null;
-  return {
-    id: raw.id,
-    name: raw.name,
-    steam_appid: typeof raw.steam_appid === 'string' ? raw.steam_appid : null,
-    icon_url: typeof raw.icon_url === 'string' ? raw.icon_url : null
-  };
 }
 
 /**

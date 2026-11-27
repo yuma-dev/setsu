@@ -355,11 +355,14 @@ function placeMotes(list: HTMLElement[]): void {
   });
 }
 
+/** body and rail grow about the star as one plane, so each gets the star as its own origin */
 function placeBody(logo: BootRevealPayload["logo"]): void {
-  if (!body) return;
   const origin = originOf(logo);
-  const r = body.getBoundingClientRect();
-  body.style.transformOrigin = `${origin.x - r.left}px ${origin.y - r.top}px`;
+  for (const el of [body, rail]) {
+    if (!el) continue;
+    const r = el.getBoundingClientRect();
+    el.style.transformOrigin = `${origin.x - r.left}px ${origin.y - r.top}px`;
+  }
 }
 
 /** promotes/mounts everything the intro moves and holds streaming, before
@@ -381,17 +384,19 @@ export async function prepareBootReveal(): Promise<void> {
   for (const el of [body, rail, ...heads, ...cards]) el?.classList.add("boot-pre");
   arm();
   body?.classList.add("boot-nohover");
-  markLiveGroups();
-  glowCanvas = prefs.glow ? buildGlowCanvas(cards) : null;
+  atRest(() => {
+    markLiveGroups();
+    glowCanvas = prefs.glow ? buildGlowCanvas(cards) : null;
+  });
   try {
     preparedLogo = (await window.clips?.getBootLogoRect?.()) ?? null;
   } catch {
     preparedLogo = null;
   }
-  placeBody(preparedLogo);
+  atRest(() => placeBody(preparedLogo));
   overlay = buildOverlay(preparedLogo);
   document.body.appendChild(overlay);
-  placeMotes(cards);
+  atRest(() => placeMotes(cards));
   // Never leave any of it behind if the reveal event does not arrive.
   window.setTimeout(clearAll, 8000);
 }
@@ -403,14 +408,15 @@ let promoted: HTMLElement[] = [];
 /** visuals settled: hover back, animation classes off (end state = natural, no visual
  * change), glow canvas removed. will-change stays: dropping 40+ layers at once cost 120ms. */
 function settleGrid(): void {
-  if (body) {
-    body.classList.remove("boot-nohover", "boot-dolly");
-    body.style.removeProperty("transform-origin");
+  if (body) body.classList.remove("boot-nohover");
+  for (const el of [body, rail]) {
+    if (!el) continue;
+    el.classList.remove("boot-dolly");
+    el.style.removeProperty("transform-origin");
   }
   for (const el of document.querySelectorAll<HTMLElement>(".clip-group-content.boot-live")) el.classList.remove("boot-live");
   shell?.classList.remove("boot-clip");
-  for (const el of [rail, ...heads, ...cards]) {
-    if (!el) continue;
+  for (const el of [...heads, ...cards]) {
     el.classList.remove("boot-par");
     el.style.removeProperty("--boot-d");
   }
@@ -439,7 +445,21 @@ function depromote(perFrame: number): void {
  * animations in the same task; their backwards fill holds the very same values */
 function arm(): void {
   body?.classList.add("boot-armed");
-  if (prefs.parallax) for (const el of [rail, ...heads, ...cards]) el?.classList.add("boot-armed");
+  rail?.classList.add("boot-armed");
+  if (prefs.parallax) for (const el of [...heads, ...cards]) el.classList.add("boot-armed");
+}
+
+/** runs `fn` with the start pose lifted, so rects come out where things rest; same task, no frame
+ * is drawn in between. the 0.5x pose would otherwise hand back shrunken rects for the origin,
+ * glow, motes and landing delays */
+function atRest<T>(fn: () => T): T {
+  const armed = [...document.querySelectorAll(".boot-armed")];
+  for (const el of armed) el.classList.remove("boot-armed");
+  try {
+    return fn();
+  } finally {
+    for (const el of armed) el.classList.add("boot-armed");
+  }
 }
 
 function disarm(): void {
@@ -543,6 +563,7 @@ async function onReveal(payload: BootRevealPayload): Promise<void> {
   holdCommits();
   body = body ?? document.querySelector<HTMLElement>(".app-body");
   shell = shell ?? document.querySelector<HTMLElement>(".app-shell");
+  rail = rail ?? document.querySelector<HTMLElement>(".rail");
   const logo = payload.logo;
 
   // overlay mounted at prepare time; rebuilt only if the logo rect differs (maximize
@@ -553,7 +574,7 @@ async function onReveal(payload: BootRevealPayload): Promise<void> {
     overlay?.remove();
     overlay = buildOverlay(logo);
     document.body.appendChild(overlay);
-    placeBody(logo);
+    atRest(() => placeBody(logo));
   }
   const layer = overlay;
   // a broken image just means that part is missing, the rest still runs
@@ -562,28 +583,29 @@ async function onReveal(payload: BootRevealPayload): Promise<void> {
   // layout may have changed since prepare (fresh list landed): repick cards/headers
   // promote new ones, redraw glow at the new positions
   const before = new Set([...cards, ...heads]);
-  cards = visibleCards();
-  heads = visibleHeaders();
-  for (const el of [...cards, ...heads]) if (!before.has(el)) el.classList.add("boot-pre");
-  for (const el of before) if (!cards.includes(el) && !heads.includes(el)) el.classList.remove("boot-pre");
-  if (glowCanvas && !drawGlow(glowCanvas, cards)) {
-    glowCanvas.remove();
-    glowCanvas = null;
-  }
-  placeMotes(cards);
-
-  // Parallax delays: each piece lands just before the portal's edge reaches it.
   const origin = originOf(logo);
   const k = Number(layer.dataset.k) || 1;
-  for (const el of [rail, ...heads, ...cards]) {
-    if (!el) continue;
-    const r = el.getBoundingClientRect();
-    const dist = Math.hypot(r.left + r.width / 2 - origin.x, r.top + r.height / 2 - origin.y);
-    el.style.setProperty("--boot-d", `${Math.round(landsAt(dist, k))}ms`);
-  }
+  atRest(() => {
+    cards = visibleCards();
+    heads = visibleHeaders();
+    if (glowCanvas && !drawGlow(glowCanvas, cards)) {
+      glowCanvas.remove();
+      glowCanvas = null;
+    }
+    placeMotes(cards);
+    // Parallax delays: each piece lands just before the portal's edge reaches it.
+    for (const el of [...heads, ...cards]) {
+      const r = el.getBoundingClientRect();
+      const dist = Math.hypot(r.left + r.width / 2 - origin.x, r.top + r.height / 2 - origin.y);
+      el.style.setProperty("--boot-d", `${Math.round(landsAt(dist, k))}ms`);
+    }
+  });
+  for (const el of [...cards, ...heads]) if (!before.has(el)) el.classList.add("boot-pre");
+  for (const el of before) if (!cards.includes(el) && !heads.includes(el)) el.classList.remove("boot-pre");
   shell?.classList.add("boot-clip");
   body?.classList.add("boot-dolly");
-  if (prefs.parallax) for (const el of [rail, ...heads, ...cards]) el?.classList.add("boot-par");
+  rail?.classList.add("boot-dolly");
+  if (prefs.parallax) for (const el of [...heads, ...cards]) el.classList.add("boot-par");
   disarm();
   if (glowCanvas) {
     glowCanvas.style.animationDelay = `${GLOW_AT_MS}ms`;

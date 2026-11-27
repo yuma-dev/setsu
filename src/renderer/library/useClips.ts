@@ -166,12 +166,12 @@ export function useClips(): UseClips {
             prev.some((c) => c.originalName === clip.originalName) ? prev : [clip, ...prev],
           );
           window.clips.generateThumbnailsProgressively([clip.originalName]).catch(() => {});
-          const tags = await window.clips.getClipTags(clip.originalName).catch(() => []);
-          if (cancelled) return;
+          const tags = await window.clips.getClipTags(clip.originalName).catch(() => null);
+          if (cancelled || !Array.isArray(tags)) return;
           setClips((prev) =>
             prev.map((c) =>
               c.originalName === clip.originalName
-                ? { ...c, tags: Array.isArray(tags) ? (tags as string[]) : [] }
+                ? { ...c, tags: tags as string[] }
                 : c,
             ),
           );
@@ -265,11 +265,13 @@ export function useClips(): UseClips {
         // empty object means the IPC call itself failed - keep current tags
         if (Object.keys(byName).length === 0) continue;
         Object.assign(allTags, byName);
-        // absent entry means "no tags", clears cached tags from the reconcile above
+        // main answers [] for a clip with no tags; an absent entry is a file it couldn't read, and
+        // dropping its tags here would let the next edit save the loss
         setClips((prev) =>
           prev.map((c) => {
             if (!sliceNames.has(c.originalName)) return c;
-            const tags = Array.isArray(byName[c.originalName]) ? byName[c.originalName] : [];
+            const tags = byName[c.originalName];
+            if (!Array.isArray(tags)) return c;
             return sameTags(c.tags, tags) ? c : { ...c, tags };
           }),
         );
@@ -285,11 +287,15 @@ export function useClips(): UseClips {
       // "new" flags are session-relative, stripped here; never cache an empty
       // library or a transient scan failure paints "no clips" next launch
       if (list.length > 0) {
+        // an unread clip keeps its tags from the last snapshot instead of caching []
+        const prevTags = new Map((cached?.clips ?? []).map((c) => [c.originalName, c.tags]));
         writeClipsCache(() => ({
           location: loc,
           clips: list.map((c) => ({
             ...c,
-            tags: Array.isArray(allTags[c.originalName]) ? allTags[c.originalName] : [],
+            tags: Array.isArray(allTags[c.originalName])
+              ? allTags[c.originalName]
+              : (prevTags.get(c.originalName) ?? []),
             isNewSinceLastSession: false,
           })),
           thumbnails: [...tmap],

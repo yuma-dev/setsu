@@ -288,8 +288,14 @@ function scheduleDeferredServices() {
   }, Number(process.env.CLIPLIB_DEFERRED_MS) || 5000);
 }
 
+// each deferred step does some sync work (a module load, a process spawn); run back to back they
+// were one 140-190 ms block on the thread that also routes clicks and scrolls, ~5 s after the window
+// shows. a gap between steps lets input through
+const DEFERRED_STEP_GAP_MS = 120;
+
 async function runDeferredServices() {
   bootTrace.mark('deferred_start');
+  const gap = () => delay(DEFERRED_STEP_GAP_MS);
   // Bench bisecting: CLIPLIB_SKIP_DEFERRED=updater,discord,ffmpeg,machine,clipdip,pins,warm
   const skip = new Set(String(process.env.CLIPLIB_SKIP_DEFERRED || '').split(',').filter(Boolean));
   const win = mainWindow;
@@ -301,6 +307,7 @@ async function runDeferredServices() {
     } catch (error) {
       logger.warn(`Post-update marker check failed: ${error.message}`);
     }
+    await gap();
     if (settings.enableDiscordRPC && !isBenchmarkMode) {
       discordModule.initDiscordRPC(getSettings);
     }
@@ -320,14 +327,17 @@ async function runDeferredServices() {
   }
 
   bootTrace.mark('deferred_updater_discord_done');
+  await gap();
   if (!skip.has('ffmpeg')) ffmpegModule.initFFmpeg().catch((err) => {
     logger.error('FFmpeg initialization failed:', err);
   });
   bootTrace.mark('deferred_ffmpeg_started');
+  await gap();
 
   // machine block for the heartbeat: collector needs the clip folder (volume class + free
   // space, never the path itself); no-op until telemetry.init() has run, which it has by now.
   if (!skip.has('machine')) void telemetry.collectMachine({ app, screen, clipLocation: settings.clipLocation });
+  await gap();
 
   // first launch with no clipdip.enabled key auto-enables clipdip (supported hardware only); a
   // failed start records enabled=false so it never loops. later launches just start if enabled.
@@ -340,6 +350,7 @@ async function runDeferredServices() {
       if (!autoEnabled) clipdipModule.ensureStartedIfEnabled();
     })
     .catch((error) => logger.warn(`Clipdip bootstrap failed: ${error.message}`));
+  await gap();
 
   // Clips->ClipLib renamed the exe, orphaning taskbar pins (.lnk targets the old Clips.exe).
   // retarget pins whose target no longer exists; idempotent, cheap no-op otherwise.

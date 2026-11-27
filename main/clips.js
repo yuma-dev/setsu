@@ -4,85 +4,44 @@ const fs = require('fs').promises;
 const logger = require('../utils/logger');
 const telemetry = require('./telemetry');
 const thumbnailsModule = require('./thumbnails');
-const { mapLimit } = require('../utils/pool');
-
-// concurrent fs.stat calls during a library walk
-const STAT_CONCURRENCY = 32;
+const libraryWorker = require('./library-worker');
+const { metadataSafeName } = require('./library-fs');
 const { logActivity } = require('../utils/activity-tracker');
-
-const VIDEO_EXTENSIONS = new Set(['.mp4', '.avi', '.mov']);
 
 // count from the last successful getClips(); kept so callers that only need
 // the count (telemetry) skip a rescan. null = no successful scan yet this session
 let lastClipCount = null;
 
-/** skips dirs starting with '.' and 'icons'. statFailures tallies stat
- * errors across the recursion; only the top-level call reports the event
+/** skips dirs starting with '.' and 'icons'; runs in the library worker
  * @param {string} dir
  * @param {string} baseDir
- * @param {number} [depth]
- * @param {object} [statFailures]
  * @returns {Promise<Array<{name: string, date: Date}>>}
  */
-async function walkClips(dir, baseDir, depth = 0, statFailures = null) {
-  const dropped = statFailures || { count: 0, errno: undefined };
-  let entries;
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch (error) {
-    logger.error(`Error reading directory ${dir}:`, error);
+async function walkClips(dir, baseDir) {
+  const walked = await libraryWorker.run('walkClips', { dir, baseDir });
+  reportWalkProblems(walked);
+  return walked.files.map((f) => ({ name: f.name, date: new Date(f.mtimeMs) }));
+}
+
+function reportWalkProblems({ unreadable, dropped }) {
+  for (const { errno, depth } of unreadable) {
+    logger.error(`Error reading a clip subfolder (${errno})`);
     // This whole subtree just vanished from the library with no user-visible sign.
     telemetry.event('clips_subtree_unreadable', {
       kind: telemetry.KIND.SILENT_FAILURE,
       severity: telemetry.SEVERITY.ERROR,
-      context: { errno: error.code, depth },
-      coalesceMs: 60000,
-      error
+      context: { errno, depth },
+      coalesceMs: 60000
     });
-    return [];
   }
-
-  // bounded stat pool: sequential costs ~180us x N clips; unbounded fan-out
-  // queues thousands of stats on the libuv threadpool and starves other file ops at startup
-  const dirs = [];
-  const files = [];
-  for (const entry of entries) {
-    if (entry.isDirectory()) {
-      if (!entry.name.startsWith('.') && entry.name !== 'icons') dirs.push(entry.name);
-    } else if (entry.isFile() && VIDEO_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
-      files.push(entry.name);
-    }
-  }
-  const subtrees = Promise.all(dirs.map((name) => walkClips(path.join(dir, name), baseDir, depth + 1, dropped)));
-  const stats = await mapLimit(files, STAT_CONCURRENCY, async (name) => {
-    const fullPath = path.join(dir, name);
-    const relativePath = path.relative(baseDir, fullPath).replace(/\\/g, '/');
-    try {
-      const st = await fs.stat(fullPath);
-      return { name: relativePath, date: st.mtime };
-    } catch (error) {
-      logger.error(`Error reading stats for ${fullPath}:`, error);
-      // tallied, not reported per file: one bad drive drops thousands
-      dropped.count += 1;
-      if (!dropped.errno) dropped.errno = error.code;
-      return null;
-    }
-  });
-  const clips = [...stats.filter(Boolean), ...(await subtrees).flat()];
-  if (!statFailures && dropped.count > 0) {
+  if (dropped.count > 0) {
+    logger.error(`Could not stat ${dropped.count} clip(s) (${dropped.errno})`);
     telemetry.event('clip_stat_dropped', {
       kind: telemetry.KIND.SILENT_FAILURE,
       severity: telemetry.SEVERITY.WARNING,
       context: { errno: dropped.errno, count: dropped.count }
     });
   }
-  return clips;
-}
-
-/** flattens a relative clip path into a safe .clip_metadata/ key, e.g.
- * "highlights/gameplay.mp4" becomes "highlights--gameplay.mp4"; root clips are unchanged */
-function metadataSafeName(clipName) {
-  return clipName.replace(/\//g, '--');
 }
 
 // Module state
@@ -347,88 +306,35 @@ function stopPeriodicSave() {
 async function getClips(getSettings) {
   const settings = await getSettings();
   const clipsFolder = settings?.clipLocation;
-  const metadataFolder = path.join(clipsFolder, ".clip_metadata");
-
   const scanStartedAt = Date.now();
 
   try {
     // dev profiler spans, no-op in production (global.__perf only exists in dev)
     const tScan = global.__perf?.now();
-    const files = await walkClips(clipsFolder, clipsFolder);
-    if (tScan != null) global.__perf.fsSpan('scan-clips-dir', tScan, global.__perf.now() - tScan, { clips: files.length });
-    files.sort((a, b) => b.date.getTime() - a.date.getTime());
-
-    const tMeta = global.__perf?.now();
-
-    // one readdir instead of ~3 ENOENT probes per clip through the fs thread
-    // pool; lowercased both sides since NTFS is case-insensitive and casing can drift
-    let metadataFiles = new Set();
-    try {
-      metadataFiles = new Set((await fs.readdir(metadataFolder)).map((f) => f.toLowerCase()));
-    } catch (error) {
-      // missing folder: no metadata, Set stays empty. any other errno means
-      // metadata exists but is unreadable, so every clip loses its custom name/trim flag silently
-      if (error.code !== 'ENOENT') {
-        telemetry.event('clip_metadata_dir_unreadable', {
-          kind: telemetry.KIND.DATA_LOSS,
-          severity: telemetry.SEVERITY.ERROR,
-          context: { errno: error.code, clips: files.length },
-          error
-        });
-      }
+    const result = await libraryWorker.run('scanLibrary', {
+      clipLocation: clipsFolder,
+      thumbnailCacheDir: thumbnailsModule.getCacheDir()
+    });
+    if (tScan != null) {
+      global.__perf.fsSpan('scan-clips-dir', tScan, result.scanMs, { clips: result.clips.length });
+      global.__perf.span('read-clip-metadata', tScan + result.scanMs, result.totalMs - result.scanMs, { clips: result.clips.length });
     }
-    const hasMetadata = (name) => metadataFiles.has(name.toLowerCase());
-
-    const clipInfoPromises = files
-      .map(async (file) => {
-        const fullPath = path.join(clipsFolder, file.name);
-        // walkClips() stat'ed this file moments ago, no existence re-check
-
-        const safeName = metadataSafeName(file.name);
-        let customName = path.basename(file.name, path.extname(file.name));
-        const isTrimmed = hasMetadata(`${safeName}.trim`);
-        const isFavorite = hasMetadata(`${safeName}.favorite`);
-        let createdAt = file.date.getTime();
-
-        if (hasMetadata(`${safeName}.customname`)) {
-          try {
-            customName = await fs.readFile(path.join(metadataFolder, `${safeName}.customname`), "utf8");
-          } catch (error) {
-            logger.error("Error reading custom name:", error);
-          }
-        }
-
-        // recording timestamp beats file mtime when present
-        if (hasMetadata(`${safeName}.date`)) {
-          try {
-            const dateStr = await fs.readFile(path.join(metadataFolder, `${safeName}.date`), "utf8");
-            // ISO 8601, e.g. "2023-08-02T22:07:31+02:00"
-            const recordingDate = new Date(dateStr);
-            if (!isNaN(recordingDate.getTime())) {
-              createdAt = recordingDate.getTime();
-            }
-          } catch (error) {
-            logger.error("Error reading date metadata:", error);
-          }
-        }
-
-        const thumbnailPath = thumbnailsModule.generateThumbnailPath(fullPath);
-
-        return {
-          originalName: file.name,
-          customName: customName,
-          createdAt: createdAt,
-          thumbnailPath: thumbnailPath,
-          isTrimmed: isTrimmed,
-          isFavorite: isFavorite,
-        };
+    const { problems } = result;
+    reportWalkProblems(problems);
+    // metadata exists but is unreadable: every clip loses its custom name and trim flag silently
+    if (problems.metadataDirErrno) {
+      telemetry.event('clip_metadata_dir_unreadable', {
+        kind: telemetry.KIND.DATA_LOSS,
+        severity: telemetry.SEVERITY.ERROR,
+        context: { errno: problems.metadataDirErrno, clips: result.clips.length }
       });
-
-    const clipInfos = (await Promise.all(clipInfoPromises)).filter(Boolean);
-    if (tMeta != null) global.__perf.span('read-clip-metadata', tMeta, global.__perf.now() - tMeta, { clips: clipInfos.length });
+    }
+    if (problems.readErrors.count > 0) {
+      logger.error(`Could not read custom name/date for ${problems.readErrors.count} clip(s) (${problems.readErrors.errno})`);
+    }
     telemetry.metric('library_scan_ms', Date.now() - scanStartedAt, { unit: 'ms' });
-    lastClipCount = clipInfos.length;
-    return clipInfos;
+    lastClipCount = result.clips.length;
+    return result.clips;
   } catch (error) {
     logger.error("Error reading directory:", error);
     // library renders empty, which reads to the user as "no clips"
@@ -442,35 +348,11 @@ async function getClips(getSettings) {
   }
 }
 
-/** mirrors walkClips' concurrent stat strategy but counts every file (video,
- * thumbnail, metadata) for the folder's real disk footprint */
-async function dirSize(dir, failures = null) {
-  // shared tally so one sweep reports once instead of per unreadable entry
-  const failed = failures || { count: 0, errno: undefined };
-  let entries;
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch (error) {
-    failed.count += 1;
-    if (!failed.errno) failed.errno = error.code;
-    return 0;
-  }
-  const tasks = entries.map(async (entry) => {
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) return dirSize(fullPath, failed);
-    if (entry.isFile()) {
-      try {
-        return (await fs.stat(fullPath)).size;
-      } catch (error) {
-        failed.count += 1;
-        if (!failed.errno) failed.errno = error.code;
-        return 0;
-      }
-    }
-    return 0;
-  });
-  const total = (await Promise.all(tasks)).reduce((a, b) => a + b, 0);
-  if (!failures && failed.count > 0) {
+/** every file under dir (video, thumbnail, metadata) for the folder's real disk footprint,
+ * walked in the library worker */
+async function dirSize(dir) {
+  const { bytes, failed } = await libraryWorker.run('dirSize', { dir });
+  if (failed.count > 0) {
     // under-reported size looks like the user freed space they still use
     telemetry.event('folder_size_underreported', {
       kind: telemetry.KIND.SILENT_FAILURE,
@@ -478,7 +360,7 @@ async function dirSize(dir, failures = null) {
       context: { errno_count: failed.count, errno: failed.errno }
     });
   }
-  return total;
+  return bytes;
 }
 
 // cached so repeated renderer polls don't re-walk the tree; nothing needs
@@ -487,7 +369,7 @@ let folderSizeCache = { location: null, bytes: 0, at: 0 };
 const FOLDER_SIZE_TTL = 4 * 60 * 1000; // 4 min, comfortably below the 5-min poll
 
 /** total bytes of the clip folder; recomputed at most once per TTL, cached
- * otherwise. runs in the main process, never touches renderer perf */
+ * otherwise. the walk runs in the library worker */
 async function getClipsFolderSize(getSettings) {
   const settings = await getSettings();
   const clipsFolder = settings?.clipLocation;

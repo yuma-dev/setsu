@@ -1,5 +1,9 @@
 const { app, ipcMain, shell } = require('electron');
-const axios = require('axios');
+// axios is 73 ms of module load; required at the first check instead of with init, which runs
+// in the deferred services right when the user starts clicking
+let axiosModule = null;
+const axios = (...args) => (axiosModule ??= require('axios'))(...args);
+axios.get = (...args) => (axiosModule ??= require('axios')).get(...args);
 const semver = require('semver');
 const fs = require('fs');
 const path = require('path');

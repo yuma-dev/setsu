@@ -1,13 +1,15 @@
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
 const fs = require('fs').promises;
-const crypto = require('crypto');
 const logger = require('../utils/logger');
 const telemetry = require('./telemetry');
 const { execFile } = require('child_process');
 const { ffmpeg, ffprobeAsync } = require('./ffmpeg');
 const { ffmpegPath } = require('./ffmpeg-binaries');
 const { mapLimit } = require('../utils/pool');
+const clipHealth = require('./clip-health');
+const libraryFs = require('./library-fs');
+const libraryWorker = require('./library-worker');
 
 // Concurrent thumbnail validations (fs.access + two small reads each).
 const VALIDATE_CONCURRENCY = 16;
@@ -15,6 +17,9 @@ const VALIDATE_CONCURRENCY = 16;
 const CONCURRENT_GENERATIONS = 4;
 const THUMBNAIL_RETRY_ATTEMPTS = 3;
 const THUMBNAIL_RETRY_BASE_MS = 1500;
+// a clip still being copied in is re-checked at this pace without using up its retries
+const BUSY_RECHECK_MS = 3000;
+const BUSY_MAX_WAIT_MS = 30 * 60 * 1000;
 const FAST_PATH_THRESHOLD = 12;
 const EPSILON = 0.001;
 const META_CORRUPT_COALESCE_MS = 600000;
@@ -69,6 +74,12 @@ function parseFfmpegExitCode(error) {
   return match ? Number(match[1]) : undefined;
 }
 
+function sendUnreadable(event, clipName) {
+  try {
+    event.sender.send('thumbnail-generation-failed', { clipName, error: 'unreadable' });
+  } catch (_) { /* window gone */ }
+}
+
 // must be called after app is ready
 async function initThumbnailCache() {
   THUMBNAIL_CACHE_DIR = path.join(app.getPath('userData'), 'thumbnail-cache');
@@ -94,8 +105,7 @@ function getCacheDir() {
 }
 
 function generateThumbnailPath(clipPath) {
-  const hash = crypto.createHash('md5').update(clipPath).digest('hex');
-  return path.join(THUMBNAIL_CACHE_DIR, `${hash}.jpg`);
+  return path.join(THUMBNAIL_CACHE_DIR, libraryFs.thumbnailFileName(clipPath));
 }
 
 async function saveThumbnailMetadata(thumbnailPath, metadata) {
@@ -182,7 +192,7 @@ async function processQueue(getSettings, getTrimData) {
 
       const totalToProcess = batch[0].totalToProcess;
 
-      await Promise.all(batch.map(async ({ clipName, event, attempts = 0 }) => {
+      await Promise.all(batch.map(async ({ clipName, event, attempts = 0, busyWaitedMs = 0 }) => {
         const clipPath = path.join(settings.clipLocation, clipName);
         const thumbnailPath = generateThumbnailPath(clipPath);
         const startedAtMs = Date.now();
@@ -191,6 +201,11 @@ async function processQueue(getSettings, getTrimData) {
         let counted = false;
 
         try {
+          if (await clipHealth.isKnownUnreadable(clipPath)) {
+            completedThumbnails++;
+            sendUnreadable(event, clipName);
+            return;
+          }
           const isValid = await validateThumbnail(clipName, thumbnailPath, getTrimData);
 
           if (!isValid) {
@@ -240,6 +255,15 @@ async function processQueue(getSettings, getTrimData) {
 
         } catch (error) {
           if (counted) inFlightGenerations--;
+          if (stage === 'probe' && busyWaitedMs < BUSY_MAX_WAIT_MS && await clipHealth.isBeingWritten(clipPath)) {
+            // still being copied in, could take minutes on a slow drive
+            logger.info(`${clipName}: still being written, thumbnail waits`);
+            setTimeout(() => {
+              thumbnailQueue.push({ clipName, event, attempts, busyWaitedMs: busyWaitedMs + BUSY_RECHECK_MS, totalToProcess });
+              processQueue(getSettings, getTrimData);
+            }, BUSY_RECHECK_MS);
+            return;
+          }
           logger.error('Error processing thumbnail for', clipName, error);
           if (attempts < THUMBNAIL_RETRY_ATTEMPTS) {
             // a clip the recorder is still writing fails every immediate retry; give it a few
@@ -258,6 +282,10 @@ async function processQueue(getSettings, getTrimData) {
                 error: error.message
               });
             } catch (_) { /* window gone */ }
+            // the open probe, analysis and later launches skip it until the file changes. exit 1 only:
+            // that is ffprobe saying the file is bad. a spawn error or 0xC0000142 (DLL init failed
+            // under load) says nothing about the file and must not shelve a healthy clip
+            if (stage === 'probe' && parseFfmpegExitCode(error) === 1) await clipHealth.markUnreadable(clipPath);
             telemetry.event('thumbnail_generation_exhausted', {
               kind: telemetry.KIND.SILENT_FAILURE,
               severity: telemetry.SEVERITY.ERROR,
@@ -265,6 +293,7 @@ async function processQueue(getSettings, getTrimData) {
                 attempts: attempts + 1,
                 stage,
                 exit_code: parseFfmpegExitCode(error),
+                reason: stage === 'probe' ? clipHealth.probeFailureReason(error) : undefined,
                 duration_s: Number.isFinite(clipDuration) ? Math.round(clipDuration) : undefined
               }
             });
@@ -322,6 +351,7 @@ async function handleInitialThumbnails(clipNames, event, getSettings, getTrimDat
       clipsNeedingGeneration.map(async clipName => {
         const clipPath = path.join(settings.clipLocation, clipName);
         try {
+          if (await clipHealth.isKnownUnreadable(clipPath)) return { clipName, unreadable: true };
           const trimData = await getTrimData(clipName);
           if (trimData) {
             return { clipName, startTime: trimData.start, exact: true };
@@ -347,21 +377,15 @@ async function handleInitialThumbnails(clipNames, event, getSettings, getTrimDat
       })
     );
 
-    const validClipData = clipData.filter(Boolean);
+    const validClipData = clipData.filter((d) => d && !d.unreadable);
+    for (const d of clipData) if (d?.unreadable) sendUnreadable(event, d.clipName);
 
-    // used to be dropped for good here; now handed to the caller's queue for retry+report
+    // handed to the caller's queue, which retries and reports thumbnail_generation_exhausted
+    // if it fails there too; an event here only doubled that one
     // (clipData keeps clipsNeedingGeneration's order, so the index pairs)
     droppedClips = clipsNeedingGeneration.filter((_, i) => !clipData[i]);
     if (droppedClips.length > 0) {
-      telemetry.event('thumbnail_fastpath_dropped', {
-        kind: telemetry.KIND.SILENT_FAILURE,
-        severity: telemetry.SEVERITY.WARNING,
-        context: {
-          count: droppedClips.length,
-          // names only, no paths, capped so context stays small
-          clips: droppedClips.slice(0, 10).map((name) => path.basename(name))
-        }
-      });
+      logger.warn(`Fast path could not probe ${droppedClips.length} clip(s), queued for retry`);
     }
 
     await Promise.all(
@@ -545,20 +569,12 @@ async function getThumbnailPath(clipName, getSettings) {
 
 async function getThumbnailPathsBatch(clipNames, getSettings) {
   const settings = await getSettings();
+  const names = Array.isArray(clipNames) ? clipNames : [];
+  const paths = names.map((clipName) => generateThumbnailPath(path.join(settings.clipLocation, clipName)));
+  // the whole library at launch, checked in the library worker
+  const exists = await libraryWorker.run('existing', { paths });
   const results = {};
-
-  await Promise.all(clipNames.map(async (clipName) => {
-    const clipPath = path.join(settings.clipLocation, clipName);
-    const thumbnailPath = generateThumbnailPath(clipPath);
-
-    try {
-      await fs.access(thumbnailPath);
-      results[clipName] = thumbnailPath;
-    } catch (error) {
-      results[clipName] = null;
-    }
-  }));
-
+  names.forEach((clipName, i) => { results[clipName] = exists[i] ? paths[i] : null; });
   return results;
 }
 

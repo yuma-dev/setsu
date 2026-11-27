@@ -11,6 +11,7 @@ const fsSync = require('fs');
 const path = require('path');
 const logger = require('../utils/logger');
 const telemetry = require('./telemetry');
+const { readFileRetry } = require('./read-retry');
 
 const INDEX_FILE = 'loudness_v1.json';
 const INDEX_VERSION = 3;
@@ -74,11 +75,25 @@ async function loadIndex() {
   if (indexPromise) return indexPromise;
   indexPromise = (async () => {
     let clips = {};
+    let raw;
     try {
-      const raw = await fs.readFile(indexPath(location), 'utf8');
+      raw = await readFileRetry(indexPath(location));
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed.clips === 'object') clips = parsed.clips;
     } catch (error) {
+      if (error.code !== 'ENOENT' && raw === undefined) {
+        // the file is fine, the read wasn't (EMFILE at launch). caching an empty index here got
+        // the whole file replaced by the next save, so hand back a throwaway one: saveIndex skips
+        // while index is null and the next call reads again
+        logger.warn(`[loudness] index read failed, retrying on next use: ${error.message}`);
+        telemetry.event('loudness_index_read_failed', {
+          kind: telemetry.KIND.DEGRADED,
+          severity: telemetry.SEVERITY.WARNING,
+          context: { errno: error?.code }
+        });
+        indexPromise = null;
+        return { location, clips: {} };
+      }
       if (error.code !== 'ENOENT') {
         logger.warn(`[loudness] index unreadable, starting empty: ${error.message}`);
         telemetry.event('loudness_index_corrupt', {
