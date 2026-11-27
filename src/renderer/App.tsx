@@ -10,7 +10,7 @@ import { useProfile } from "./shell/useProfile";
 import VideoPlayer from "./player/VideoPlayer";
 import OnboardingGate from "./onboarding/OnboardingGate";
 import RebrandGate from "./onboarding/RebrandGate";
-import KofiNote from "./onboarding/KofiNote";
+import Corner from "./messages/Corner";
 import AnalysisIntro from "./onboarding/AnalysisIntro";
 import RecapGate from "./recap/RecapGate";
 import { useClips } from "./library/useClips";
@@ -27,6 +27,8 @@ import { setBenchmarkContext } from "./benchmark/context";
 // boot bundle is the library and its shell only.
 const SettingsView = lazy(() => import("./views/SettingsView"));
 const FeedPage = lazy(() => import("./feed/FeedPage"));
+// dev only, the import drops out of production builds
+const DesignerGate = import.meta.env.DEV ? lazy(() => import("./messages/designer/request").then((m) => ({ default: m.DesignerGate }))) : null;
 const ProfilePage = lazy(() => import("./feed/ProfilePage"));
 
 const PIN_KEY = "clip-library:rail-pinned";
@@ -351,8 +353,13 @@ export default function App() {
       {/* one-time 3.0 intro + ClipDip setup; wizard chunk loads only when opened, reopenable via __showOnboarding() */}
       <OnboardingGate />
       <RebrandGate />
-      {/* once per update, my avatar asking for a tip */}
-      <KofiNote />
+      {/* release notes after an update and broadcasts, bottom right, from github.com/yuma-dev/setsu-messages */}
+      <Corner />
+      {DesignerGate ? (
+        <Suspense fallback={null}>
+          <DesignerGate />
+        </Suspense>
+      ) : null}
       {/* the analysis heads-up for anyone past the tour; shows once when the library listen starts */}
       <AnalysisIntro />
       {/* year recap overlay, opened from its rail pill; the recap itself is a lazy chunk */}

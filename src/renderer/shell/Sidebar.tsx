@@ -12,6 +12,7 @@ import SettingsRail from "./SettingsRail";
 import UpdatePill from "./UpdatePill";
 import RecapPill from "./RecapPill";
 import AnalysisPill from "./AnalysisPill";
+import { useUnreadCount } from "../messages/useUnread";
 import FeedRailFilters from "../feed/FeedRailFilters";
 import type { UseLibraryFilter } from "../library/useLibraryFilter";
 import type { Collection } from "../library/filter";
@@ -53,6 +54,7 @@ function Sidebar({
   backRoute = "library",
 }: SidebarProps) {
   const toast = useToast();
+  const unread = useUnreadCount();
   // feed requires a ClipLib login, the nav item locks while logged out
   const { connected, verifying } = useProfile();
   const feedLocked = !connected && !verifying;
@@ -146,6 +148,7 @@ function Sidebar({
                   {active ? <span className="rail-item-mark" aria-hidden="true" /> : null}
                   <span className="r-ico">
                     <Icon size={17} />
+                    {id === "settings" && unread > 0 ? <span className="rail-unread-dot" aria-label="unread" /> : null}
                   </span>
                   <span className="rail-label">{label}</span>
                   {id === "library" ? <span className="rail-count-pill r-label">{counts.total}</span> : null}

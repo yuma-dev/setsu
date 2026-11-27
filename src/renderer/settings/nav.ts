@@ -3,6 +3,7 @@ import {
   AudioLines,
   Bell,
   Clapperboard,
+  Code2,
   FolderOpen,
   HardDrive,
   Info,
@@ -12,6 +13,7 @@ import {
   Palette,
   Settings2,
   Share2,
+  Sparkles,
   Video,
   Videotape,
   type LucideIcon,
@@ -28,13 +30,15 @@ export type SectionId =
   | "storage"
   | "shortcuts"
   | "cliplib"
+  | "whatsnew"
   | "about"
   | "clipdip-general"
   | "clipdip-video"
   | "clipdip-audio"
   | "clipdip-output"
   | "clipdip-hotkeys"
-  | "clipdip-notifications";
+  | "clipdip-notifications"
+  | "dev-messages";
 
 export interface SectionDef {
   id: SectionId;
@@ -56,6 +60,7 @@ export const NAV_GROUPS: { label?: string; items: SectionDef[] }[] = [
       { id: "storage", label: "Storage", icon: HardDrive, blurb: "What takes up space, and ways to get it back" },
       { id: "shortcuts", label: "Shortcuts", icon: Keyboard, blurb: "Player keyboard bindings" },
       { id: "cliplib", label: "Setsu", icon: Share2, blurb: "Account, invite codes, and API tokens" },
+      { id: "whatsnew", label: "What's new", icon: Sparkles, blurb: "Notes on each update and announcements" },
       { id: "about", label: "About", icon: Info, blurb: "Version, updates, and diagnostics" },
     ],
   },
@@ -71,6 +76,14 @@ export const NAV_GROUPS: { label?: string; items: SectionDef[] }[] = [
     ],
   },
 ];
+
+// npm run dev only: tools for me, never in a shipped build
+if (import.meta.env.DEV) {
+  NAV_GROUPS.push({
+    label: "Dev",
+    items: [{ id: "dev-messages", label: "Messages", icon: Code2, blurb: "Release notes and broadcasts, published to github.com/yuma-dev/setsu-messages" }],
+  });
+}
 
 export const ALL_SECTIONS = NAV_GROUPS.flatMap((g) => g.items);
 

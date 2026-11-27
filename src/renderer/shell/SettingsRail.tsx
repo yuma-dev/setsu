@@ -4,10 +4,12 @@ import { ALL_SECTIONS, NAV_GROUPS, openSection, useSettingsNav } from "../settin
 import { searchSettings, type SearchHit } from "../settings/search";
 import { useLiveExtensions } from "../settings/sections/discord/useDiscordSettings";
 import { routes, type Route } from "../routes";
+import { useUnreadCount } from "../messages/useUnread";
 
 /** the rail while settings is open: back, settings search, the sections */
 export default function SettingsRail({ back, onBack }: { back: Route; onBack: () => void }) {
   const { section } = useSettingsNav();
+  const unread = useUnreadCount();
   const [query, setQuery] = useState("");
   const [hi, setHi] = useState(0);
   const input = useRef<HTMLInputElement>(null);
@@ -131,6 +133,7 @@ export default function SettingsRail({ back, onBack }: { back: Route; onBack: ()
                     {active ? <span className="rail-item-mark" aria-hidden="true" /> : null}
                     <span className="r-ico">
                       <Icon size={16} />
+                      {id === "whatsnew" && unread > 0 ? <span className="rail-unread-dot" aria-label="unread" /> : null}
                     </span>
                     <span className="rail-label">{label}</span>
                   </button>

@@ -1,7 +1,7 @@
 // One-command GitHub release for ClipLib (ported from clipdip's release flow).
 //
-//   npm run release:preview   generates RELEASE_DRAFT.md from commits; edit it, and write the
-//                             in-app note in RELEASE_NOTE.md (gen-release-note.mjs bakes it in)
+//   npm run release:preview   generates RELEASE_DRAFT.md from commits; edit it. then opens the dev
+//                             app's designer to write the in-app note into github.com/yuma-dev/setsu-messages
 //   npm run release           build + tag + GitHub release with the installer
 //
 // Flags: --draft, --prerelease, --skip-build, --skip-tag
@@ -16,11 +16,11 @@ import { basename, dirname, join, resolve } from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { generateChangelog } from './changelog.mjs';
-import { readReleaseNote } from './gen-release-note.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const draftFile = join(root, 'RELEASE_DRAFT.md');
-const noteFile = join(root, 'RELEASE_NOTE.md');
+// the in-app notes feed the designer publishes to
+const FEED_URL = 'https://raw.githubusercontent.com/yuma-dev/setsu-messages/main/feed.json';
 
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 const appTitle = pkg.build?.productName ?? pkg.displayName ?? pkg.name;
@@ -60,11 +60,7 @@ async function main() {
   console.log(body);
   console.log();
 
-  const note = readReleaseNote();
-  console.log(note ? `In-app note:\n\nHey, ${note}\n` : 'In-app note: none, the app shows the default.\n');
-  if (!options.build && note) {
-    console.log('--skip-build: the note only ships if the existing build already has it baked in.\n');
-  }
+  await reportFeedNote(version);
 
   if (options.build) {
     console.log('Building (renderer + clipdip + installer)...');
@@ -100,12 +96,22 @@ async function main() {
     unlinkSync(draftFile);
     console.log('RELEASE_DRAFT.md cleaned up.');
   }
-  if (existsSync(noteFile)) {
-    unlinkSync(noteFile);
-    console.log('RELEASE_NOTE.md cleaned up.');
-  }
 
   console.log(`Release ${tag} is ready on GitHub Releases.`);
+}
+
+// a missing note doesn't block: people get the default line, and a note published later still
+// shows for anyone who hasn't launched the new version yet
+async function reportFeedNote(version) {
+  try {
+    const res = await fetch(FEED_URL, { cache: 'no-store' });
+    const feed = await res.json();
+    const note = (feed.notes ?? []).find((n) => n.version === version);
+    if (note?.body?.trim()) console.log(`In-app note for v${version}:\n\nHey, ${note.body.trim()}\n`);
+    else console.log(`No in-app note for v${version} in the feed yet, the app shows the default line. Write one with npm run release:preview.\n`);
+  } catch (e) {
+    console.log(`Could not read the in-app notes feed (${e.message}), carrying on.\n`);
+  }
 }
 
 function parseArgs(args) {

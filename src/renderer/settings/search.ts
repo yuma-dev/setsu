@@ -25,6 +25,8 @@ const TITLES: Record<SectionId, string[]> = {
   storage: ["Clip folder", "Clean up"],
   shortcuts: ["Player shortcuts"],
   cliplib: ["Setsu account", "API tokens", "Create token", "Invite codes", "Invite friends"],
+  "dev-messages": ["Release notes", "Broadcasts", "Publish"],
+  whatsnew: ["Release notes", "Changelog", "Updates", "Announcements"],
   about: ["Updates", "Check for updates", "Report a problem", "Send diagnostics", "Anonymous diagnostics"],
   "clipdip-general": ["Enable Setsu Recorder", "Start with Windows", "Process", "Setsu Recorder binary", "Diagnostics"],
   "clipdip-video": [

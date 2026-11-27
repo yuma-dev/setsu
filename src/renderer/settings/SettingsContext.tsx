@@ -84,6 +84,8 @@ export const SETTINGS_DEFAULTS: AppSettings = {
   analysisIntroSeen: false,
   setsuIntroSeen: false,
   lastRunVersion: "",
+  messagesDismissed: [],
+  messagesRead: [],
   previewVolume: 0.1,
   speedPitch: "tape",
   ambientGlow: { ...AMBIENT_GLOW_DEFAULTS },

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, type ReactNode } from "react";
+import { Suspense, lazy, useEffect, useMemo, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import GeneralSection from "../settings/sections/GeneralSection";
 import AppearanceSection from "../settings/sections/AppearanceSection";
@@ -9,6 +9,7 @@ import ExportSection from "../settings/sections/ExportSection";
 import StorageSection from "../settings/sections/StorageSection";
 import ShortcutsSection from "../settings/sections/ShortcutsSection";
 import AboutSection from "../settings/sections/AboutSection";
+import WhatsNewSection from "../settings/sections/WhatsNewSection";
 import CliplibSection from "../settings/sections/CliplibSection";
 import DiscordSection from "../settings/sections/discord/DiscordSection";
 import { ClipdipProvider } from "../settings/sections/clipdip/ClipdipContext";
@@ -25,6 +26,9 @@ import type { UseClips } from "../library/useClips";
 import type { UseLibraryFilter } from "../library/useLibraryFilter";
 
 export { NAV_GROUPS } from "../settings/nav";
+
+// dev only, the import drops out of production builds
+const MessagesSection = import.meta.env.DEV ? lazy(() => import("../messages/designer/MessagesSection")) : null;
 
 interface SettingsViewProps {
   lib: UseClips;
@@ -102,6 +106,7 @@ export default function SettingsView({ lib, filter }: SettingsViewProps) {
     storage: () => <StorageSection lib={lib} />,
     shortcuts: () => <ShortcutsSection />,
     cliplib: () => <CliplibSection />,
+    whatsnew: () => <WhatsNewSection />,
     about: () => <AboutSection />,
     "clipdip-general": () => <ClipdipGeneralSection />,
     "clipdip-video": () => <ClipdipVideoSection />,
@@ -109,6 +114,12 @@ export default function SettingsView({ lib, filter }: SettingsViewProps) {
     "clipdip-output": () => <ClipdipOutputSection />,
     "clipdip-hotkeys": () => <ClipdipHotkeysSection />,
     "clipdip-notifications": () => <ClipdipNotificationsSection />,
+    "dev-messages": () =>
+      MessagesSection ? (
+        <Suspense fallback={null}>
+          <MessagesSection />
+        </Suspense>
+      ) : null,
   };
 
   return (
@@ -120,7 +131,7 @@ export default function SettingsView({ lib, filter }: SettingsViewProps) {
           <AnimatePresence mode="wait" initial={false}>
             <motion.div
               key={section}
-              className={`settings-page${section === "discord" ? " wide" : ""}`}
+              className={`settings-page${section === "discord" ? " wide" : section === "dev-messages" ? " fill" : ""}`}
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -6 }}

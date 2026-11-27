@@ -40,8 +40,11 @@ const DEFAULT_SETTINGS = {
   analysisIntroSeen: false,
   // the one-time "ClipLib is now Setsu" card (RebrandGate), after the tour
   setsuIntroSeen: false,
-  // version the renderer last ran as; a change shows the ko-fi note (KofiNote.tsx)
+  // corner messages (src/renderer/messages): version last run as, so an update shows the notes since;
+  // broadcast ids dismissed for good; note and broadcast keys already seen, for the What's new dot
   lastRunVersion: "",
+  messagesDismissed: [],
+  messagesRead: [],
   iconGreyscale: false,
   // loudness matching: clips without a custom volume play at targetLufs; null target
   // means the library median. levels come from the audio analysis every clip gets once

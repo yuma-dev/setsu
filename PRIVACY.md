@@ -67,8 +67,10 @@ deleting your shared clips/account (contact us if you need help removing content
 To keep the app current, Setsu checks GitHub
 (`api.github.com` / `github.com/yuma-dev/setsu`) for the latest release and, if you
 choose to update, downloads the installer from there. These requests send only a generic
-`User-Agent` header, **no account, no identifiers**. After an update, Setsu also loads the
-developer's profile picture from `github.com` for a short note. GitHub, as the host, may log the
+`User-Agent` header, **no account, no identifiers**. At launch and every 3 hours Setsu also
+reads the release notes and announcements feed (`raw.githubusercontent.com/yuma-dev/setsu-messages`)
+and the pictures in it, and loads the developer's profile picture from `github.com` to show next to
+them. Nothing is sent back about whether you read them. GitHub, as the host, may log the
 request under [GitHub's Privacy Statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement).
 
 ---
@@ -181,7 +183,7 @@ rely on your **consent** (Art. 6(1)(a)).
 | `logs.setsu.gg` (Diagnostics, operated by us) | Crash/bug diagnostics for the **library app** | Random install/machine/session IDs, app version, hardware profile, feature settings, error events, aggregated timing metrics, log tails on fatal errors | Auto (opt-out) |
 | `logs.setsu.gg` (Diagnostics, operated by us) | Crash/bug diagnostics for the **recorder (Setsu Recorder)** | Random install/machine/session IDs, app version, hardware and capture configuration, capture/encoder failures, log tails | Auto (separate opt-out) |
 | `logs.setsu.gg` (Diagnostics, operated by us) | Manual problem reports | One bundle: logs, settings files, activity log, console output, recorder logs and status, crash-dump listing, system info, your note | Only when you press "Export and upload" |
-| GitHub (`github.com`) | Update check & download, developer avatar | Generic User-Agent only | On update check/download, first launch after an update |
+| GitHub (`github.com`, `raw.githubusercontent.com`) | Update check & download, release notes and announcements feed, developer avatar | Generic User-Agent only | On update check/download, at launch and every 3 hours |
 | Discord (`discord.com`) | Login & voice-roster read | OAuth login; reads your live voice-channel membership | Only if you connect Discord |
 
 Recording and video processing (ffmpeg/ffprobe) run **entirely on your device**.
