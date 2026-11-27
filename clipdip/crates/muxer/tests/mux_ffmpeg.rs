@@ -1,5 +1,6 @@
 use clipdip_muxer::{
-    ffmpeg_major, mux_with_options, AacEncoder, AudioTrack, MuxOptions, MuxStrategy, VideoBitstream,
+    ffmpeg_major, mux_with_options, mux_with_progress, AacEncoder, AudioTrack, MuxOptions,
+    MuxProgress, MuxStrategy, VideoBitstream,
 };
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -454,4 +455,34 @@ fn ffmpeg_version_detects_real_binary_and_missing_path() {
         return;
     };
     assert!(ffmpeg_major(&ffmpeg) >= 6, "{}", ffmpeg.display());
+}
+
+#[test]
+fn progress_climbs_to_the_end_on_both_strategies() {
+    let Some(ffmpeg) = resolve_ffmpeg() else {
+        return;
+    };
+    let fixture = Fixture::new(ffmpeg);
+    for strategy in [MuxStrategy::SinglePass, MuxStrategy::ParallelTracks] {
+        let seen = std::sync::Mutex::new(Vec::<f32>::new());
+        let report = |f: f32| seen.lock().unwrap().push(f);
+        let output = fixture.dir.0.join(format!("progress-{strategy:?}.mp4"));
+        mux_with_progress(
+            &fixture.ffmpeg,
+            &fixture.video,
+            VideoBitstream::H264,
+            60.0,
+            &fixture.tracks,
+            true,
+            &output,
+            MuxOptions { strategy, encoder: AacEncoder::Native },
+            Some(MuxProgress { duration_secs: 4.0, report: &report }),
+        )
+        .unwrap_or_else(|error| panic!("mux {strategy:?}: {error:#}"));
+        let seen = seen.into_inner().unwrap();
+        assert!(!seen.is_empty(), "{strategy:?}: no progress at all");
+        assert!(seen.windows(2).all(|w| w[1] > w[0]), "{strategy:?}: went backwards {seen:?}");
+        assert_eq!(*seen.last().unwrap(), 1.0, "{strategy:?}: never reached the end {seen:?}");
+        assert!(std::fs::metadata(&output).unwrap().len() > 0);
+    }
 }

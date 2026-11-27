@@ -330,6 +330,42 @@
     .drain.on i { animation: draink var(--drain-ms, 4000ms) linear forwards; }
     @keyframes draink { to { transform: scaleX(0); } }
 
+    /* save progress: once a save runs long the spinning comet settles into the
+       border and draws one lap from clip-progress. rects are sized from js */
+    .lap, .lapglow {
+      position: absolute; inset: 0;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity .4s ease;
+    }
+    .lapglow { filter: blur(0.9vh); z-index: -1; }
+    .lap svg, .lapglow svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+    .card.saving.progress .lap { opacity: 1; }
+    .card.saving.progress .lapglow { opacity: .85; }
+    .card.saving.progress::before,
+    .card.saving.progress .glowwrap { opacity: 0; }
+    .lap .h { filter: drop-shadow(0 0 4px #e9d5ff) drop-shadow(0 0 9px #d844dd); }
+
+    .prog-row {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; gap: 0.5vh;
+      font-weight: 500; font-size: 1.25vh; line-height: 1;
+      color: rgba(255, 255, 255, 0.5);
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0;
+      transform: translateY(0.4vh);
+      transition: opacity .35s ease, transform .35s ease;
+    }
+    .card.saving.progress .prog-row { opacity: 1; transform: none; }
+    .prog-row .stage { color: rgba(233, 213, 255, 0.88); }
+    .prog-row .sep { color: rgba(255, 255, 255, 0.22); }
+    .prog-row .pct {
+      font: 600 1.2vh/1 "Cascadia Mono", Consolas, ui-monospace, monospace;
+      color: rgba(255, 255, 255, 0.62);
+      font-variant-numeric: tabular-nums;
+    }
+
     /* Sparkles (the logo's four-point star) twinkling on save —
        spawned from JS, animated via the Web Animations API. */
     .sparkle { position: absolute; pointer-events: none; z-index: 3; }
@@ -641,6 +677,7 @@
             maxlength="120"
           />
           <span class="rename-display" id="rename-display"></span>
+          <div class="prog-row"><span class="stage" id="prog-stage">Writing</span><span class="sep">&middot;</span><span class="pct" id="prog-pct">0%</span></div>
           <div class="underline"></div>
         </div>
         <div class="update-sub" id="update-sub"></div>
@@ -650,6 +687,13 @@
       <span class="ember e2"></span>
       <span class="ember e3"></span>
       <div class="drain" id="drain"><i></i></div>
+      <div class="lapglow"><svg><rect class="g" fill="none" stroke="#c084fc" stroke-width="7" pathLength="100" stroke-dasharray="0 100"/></svg></div>
+      <div class="lap"><svg>
+        <defs><linearGradient id="lapg" x1="0" x2="1"><stop offset="0" stop-color="#7c3aed"/><stop offset=".6" stop-color="#d844dd"/><stop offset="1" stop-color="#f5d0fe"/></linearGradient></defs>
+        <rect class="t" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="1.2" pathLength="100"/>
+        <rect class="f" fill="none" stroke="url(#lapg)" stroke-width="1.6" stroke-linecap="round" pathLength="100" stroke-dasharray="0 100"/>
+        <rect class="h" fill="none" stroke="#fbf5ff" stroke-width="2.4" stroke-linecap="round" pathLength="100" stroke-dasharray="0.6 100"/>
+      </svg></div>
     </div>
     <div class="rec-dot" title="Recording"><span class="orb"></span><span class="core"></span></div>
   </div>
@@ -814,6 +858,8 @@
       const anchor       = document.getElementById("anchor");
       const card         = document.getElementById("card");
       const titleEl      = document.getElementById("title");
+      const progStage    = document.getElementById("prog-stage");
+      const progPct      = document.getElementById("prog-pct");
       const hintEl       = document.getElementById("hint");
       const hintRow      = document.getElementById("hint-row");
       const input        = document.getElementById("rename-input");
@@ -946,30 +992,132 @@
         }, wait);
       };
 
+      // --- Save progress ------------------------------------------------
+      // a quick save never shows it; past this the comet draws one lap of the border
+      const PROGRESS_SHOW_AFTER_MS = 700;
+      let lastProgressAt = 0;
+      // events land in steps, the lap eases toward the latest one each frame
+      let progTarget = 0;
+      let progDisp = 0;
+      let progRaf = 0;
+      const lapRects = card.querySelectorAll(".lap rect, .lapglow rect");
+      const lapFill = card.querySelector(".lap .f");
+      const lapGlow = card.querySelector(".lapglow .g");
+      const lapHead = card.querySelector(".lap .h");
+      const layLap = () => {
+        const w = card.offsetWidth, h = card.offsetHeight;
+        if (!w || !h) return;
+        const r = parseFloat(getComputedStyle(card).borderRadius) || 0;
+        lapRects.forEach((el) => {
+          el.setAttribute("x", 0.6); el.setAttribute("y", 0.6);
+          el.setAttribute("width", w - 1.2); el.setAttribute("height", h - 1.2);
+          el.setAttribute("rx", r);
+        });
+      };
+      // the title swaps to "Still saving" mid-save, which changes the card width
+      new ResizeObserver(layLap).observe(card);
+      const drawLap = (v) => {
+        const pct = v * 100;
+        lapFill.setAttribute("stroke-dasharray", `${pct} 100`);
+        lapGlow.setAttribute("stroke-dasharray", `${pct} 100`);
+        lapHead.setAttribute("stroke-dashoffset", -Math.max(0, pct - 0.6));
+        progPct.textContent = `${Math.round(v * 100)}%`;
+      };
+      const stepLap = () => {
+        progDisp += (progTarget - progDisp) * 0.14;
+        if (Math.abs(progTarget - progDisp) < 0.001) progDisp = progTarget;
+        drawLap(progDisp);
+        progRaf = progDisp === progTarget ? 0 : requestAnimationFrame(stepLap);
+      };
+      const resetProgress = () => {
+        lastProgressAt = 0;
+        progTarget = progDisp = 0;
+        if (progRaf) cancelAnimationFrame(progRaf);
+        progRaf = 0;
+        card.classList.remove("progress");
+      };
+      // the audio write is a blip next to the video, so both read as writing
+      const STAGE_WORDS = {
+        writing_video: "Writing",
+        writing_audio: "Writing",
+        muxing: "Finishing",
+      };
+      const showProgress = (p) => {
+        if (state.phase !== "saving" || savedTimer) return;
+        lastProgressAt = performance.now();
+        if (lastProgressAt - savingShownAt < PROGRESS_SHOW_AFTER_MS) return;
+        progTarget = Math.max(progTarget, Math.min(1, Number(p.progress) || 0));
+        progStage.textContent = STAGE_WORDS[p.stage] || "Saving";
+        if (!card.classList.contains("progress")) {
+          layLap();
+          drawLap(progDisp);
+          card.classList.add("progress");
+        }
+        if (!progRaf) progRaf = requestAnimationFrame(stepLap);
+      };
+
       // Upper bound on how long we'll show "Saving clip…" before
       // assuming the mux silently failed. Without this the spinner can
       // get stuck forever if clip-saved never arrives (process killed
       // mid-mux, ffmpeg crash without a clip-error event, etc.).
       const SAVING_TIMEOUT_MS = 20000;
+      // a save the backend still runs is slow, not dead: 41 s for a 961 MB clip on a slow
+      // drive, 65 s for a 6 min recording. the old fixed 20 s hid those toasts and reported them
+      const SAVING_RECHECK_MS = 5000;
+      const SAVING_GIVE_UP_MS = 10 * 60 * 1000;
+      let savingArmedAt = 0;
+      // bumped on every arm/clear so a check still waiting on invoke can't act on a newer flow
+      let savingCheckGen = 0;
+      const checkSaving = (gen) => {
+        savingTimeoutTimer = null;
+        const live = () => gen === savingCheckGen && state.phase === "saving" && !savedTimer;
+        if (!live()) return;
+        const elapsed = Math.round(performance.now() - savingArmedAt);
+        invoke("overlay_save_in_flight")
+          .catch(() => false)
+          .then((busy) => {
+            if (!live()) return;
+            if (busy && elapsed < SAVING_GIVE_UP_MS) {
+              // progress events already say what it's doing; this is for a save that went quiet
+              if (performance.now() - lastProgressAt > SAVING_RECHECK_MS) {
+                titleEl.textContent = state.kind === "recording" ? "Still saving recording…" : "Still saving clip…";
+              }
+              savingTimeoutTimer = setTimeout(() => checkSaving(gen), SAVING_RECHECK_MS);
+              return;
+            }
+            // finished but the clip-saved event got lost: the stash still has it
+            return invoke("overlay_get_pending")
+              .catch(() => null)
+              .then((p) => {
+                if (!live()) return;
+                if (p && p.saved) {
+                  state.kind = p.saved.kind || state.kind;
+                  state.path = p.saved.path || null;
+                  scheduleSavedPhase();
+                  return;
+                }
+                console.warn("[overlay] saving timeout, dismissing");
+                // The "no clip-error event ever fired" hole: the save died in a
+                // way nothing else reports (process killed mid-mux, ffmpeg
+                // crash). Backend gates and forwards this as telemetry.
+                invoke("report_frontend_event", {
+                  windowLabel: "overlay",
+                  code: "overlay_saving_timeout",
+                  message: "overlay gave up waiting for clip-saved",
+                  context: { elapsed_ms: elapsed, kind: state.kind || "clip", still_in_flight: !!busy },
+                }).catch(() => {});
+                dismiss();
+              });
+          });
+      };
       const armSavingTimeout = () => {
         if (savingTimeoutTimer) clearTimeout(savingTimeoutTimer);
-        savingTimeoutTimer = setTimeout(() => {
-          if (state.phase === "saving") {
-            console.warn("[overlay] saving timeout — dismissing");
-            // The "no clip-error event ever fired" hole: the save died in a
-            // way nothing else reports (process killed mid-mux, ffmpeg
-            // crash). Backend gates and forwards this as telemetry.
-            invoke("report_frontend_event", {
-              windowLabel: "overlay",
-              code: "overlay_saving_timeout",
-              message: "overlay gave up waiting for clip-saved",
-              context: { elapsed_ms: SAVING_TIMEOUT_MS, kind: state.kind || "clip" },
-            }).catch(() => {});
-            dismiss();
-          }
-        }, SAVING_TIMEOUT_MS);
+        savingArmedAt = performance.now();
+        const gen = ++savingCheckGen;
+        savingTimeoutTimer = setTimeout(() => checkSaving(gen), SAVING_TIMEOUT_MS);
       };
       const clearSavingTimeout = () => {
+        savingCheckGen++;
         if (savingTimeoutTimer) {
           clearTimeout(savingTimeoutTimer);
           savingTimeoutTimer = null;
@@ -995,6 +1143,9 @@
       const setPhase = (p) => {
         state.phase = p;
         if (p === "saving") savingShownAt = performance.now();
+        // close the lap so it fades out full while the saved burst plays
+        if (p === "saved" && card.classList.contains("progress")) drawLap(1);
+        resetProgress();
         // Effect classes from a previous phase must not leak into the
         // next one (e.g. a new clip-saving while the flash is mid-burn).
         card.classList.remove("saving", "saved", "renamed", "notice", "update",
@@ -1267,6 +1418,8 @@
         showCard();
         armSavingTimeout();
       });
+
+      listen("clip-progress", (ev) => showProgress(ev.payload || {}));
 
       listen("recording-state", (ev) => {
         const p = ev.payload || {};

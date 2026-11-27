@@ -16,7 +16,9 @@ use tracing::{error, info, warn};
 use clipdip_audio::{list_devices, AudioCapture, AudioDeviceInfo, AudioKind, DeviceFlow, WaveFormat};
 use clipdip_capture::{CaptureBackend, Capturer};
 use clipdip_encoder::{ActiveCodec, CodecPreference, EncoderConfig, NvEncoderD3D11, RateControl};
-use clipdip_muxer::{mux_with_ffmpeg_cli, resolve_ffmpeg_path, AudioTrack, VideoBitstream};
+use clipdip_muxer::{
+    mux_with_progress, resolve_ffmpeg_path, AudioTrack, MuxOptions, MuxProgress, VideoBitstream,
+};
 use clipdip_ringbuf::{EncodedPacket, MediaClock, PacketRing, STREAM_VIDEO};
 
 use crate::config::{
@@ -278,7 +280,7 @@ impl Pipeline {
     /// Snapshot the ring, trim to the oldest video IDR, write `.h264` +
     /// per-source `.wav` sidecars, mux to MP4. Returns the saved path.
     pub fn save_clip(&self) -> Result<PathBuf> {
-        self.save_clip_in(None, &FilenameVars::default())
+        self.save_clip_in(None, &FilenameVars::default(), None)
     }
 
     /// Like [`save_clip`] but to `directory_override`, so a directory config
@@ -287,6 +289,7 @@ impl Pipeline {
         &self,
         directory_override: Option<&std::path::Path>,
         vars: &FilenameVars,
+        progress: Option<&SaveProgressFn>,
     ) -> Result<PathBuf> {
         let codec = *self.active_codec.lock().unwrap();
         let header = self.codec_header.lock().unwrap().clone();
@@ -310,6 +313,7 @@ impl Pipeline {
             codec,
             &header,
             None,
+            progress,
         )
     }
 
@@ -353,6 +357,7 @@ impl Pipeline {
         &self,
         directory_override: Option<&std::path::Path>,
         vars: &FilenameVars,
+        progress: Option<&SaveProgressFn>,
     ) -> Result<PathBuf> {
         let anchor = self
             .recording_from
@@ -387,6 +392,7 @@ impl Pipeline {
             codec,
             &header,
             Some(anchor),
+            progress,
         );
         // hold released only after save_clip_with_stem's synchronous snapshot
         self.ring.set_hold(None);
@@ -405,6 +411,7 @@ impl Pipeline {
             stem,
             codec,
             &header,
+            None,
             None,
         )
     }
@@ -1272,6 +1279,32 @@ fn video_loop(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// where a save is, for the overlay. a 1 GB clip took 8 s to write out and 30 s to mux on a
+/// slow drive, long enough that a bare spinner read as stuck
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveStage {
+    WritingVideo,
+    WritingAudio,
+    Muxing,
+}
+
+impl SaveStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SaveStage::WritingVideo => "writing_video",
+            SaveStage::WritingAudio => "writing_audio",
+            SaveStage::Muxing => "muxing",
+        }
+    }
+}
+
+/// stage plus how far the whole save is, 0..1
+pub type SaveProgressFn = dyn Fn(SaveStage, f32) + Sync;
+
+// rough share of a save's time per stage, measured on h264 at 60 Mbps to a hard drive
+const VIDEO_WRITE_SHARE: f32 = 0.2;
+const AUDIO_WRITE_SHARE: f32 = 0.05;
+
 fn save_clip_with_stem(
     ring: &PacketRing,
     cfg: &Config,
@@ -1280,7 +1313,13 @@ fn save_clip_with_stem(
     active_codec: Option<ActiveCodec>,
     codec_header: &[u8],
     t_min_override: Option<i64>,
+    progress: Option<&SaveProgressFn>,
 ) -> Result<PathBuf> {
+    let report = |stage: SaveStage, overall: f32| {
+        if let Some(p) = progress {
+            p(stage, overall.clamp(0.0, 1.0));
+        }
+    };
     let codec = active_codec
         .ok_or_else(|| anyhow!("encoder not yet open — wait ~1s after start and retry"))?;
     let _t = clipdip_profile::start("pipeline.save_clip");
@@ -1483,11 +1522,19 @@ fn save_clip_with_stem(
             .inspect_err(|e| report_disk_error("header", e))
             .with_context(|| format!("write header to {}", video_path.display()))?;
     }
-    for p in &video_pkts {
+    report(SaveStage::WritingVideo, 0.0);
+    let total_pkts = video_pkts.len().max(1);
+    // every 2% of the packets, plenty for a bar and nothing next to the write itself
+    let step = (total_pkts / 50).max(1);
+    for (i, p) in video_pkts.iter().enumerate() {
         vf.write_all(&p.bytes)
             .inspect_err(|e| report_disk_error("packet", e))
             .with_context(|| format!("write {}", video_path.display()))?;
+        if i % step == 0 {
+            report(SaveStage::WritingVideo, VIDEO_WRITE_SHARE * i as f32 / total_pkts as f32);
+        }
     }
+    report(SaveStage::WritingAudio, VIDEO_WRITE_SHARE);
     // no fsync: ffmpeg reads the sidecars back through the page cache and they are
     // deleted after the mux, flushing 200MB first only delayed the encode
 
@@ -1556,7 +1603,10 @@ fn save_clip_with_stem(
         ActiveCodec::H264 => VideoBitstream::H264,
         ActiveCodec::Av1 => VideoBitstream::Av1,
     };
-    mux_with_ffmpeg_cli(
+    let mux_base = VIDEO_WRITE_SHARE + AUDIO_WRITE_SHARE;
+    report(SaveStage::Muxing, mux_base);
+    let mux_report = |frac: f32| report(SaveStage::Muxing, mux_base + frac * (1.0 - mux_base));
+    mux_with_progress(
         &ffmpeg,
         &video_path,
         bitstream,
@@ -1564,6 +1614,11 @@ fn save_clip_with_stem(
         &audio_tracks,
         cfg.audio.include_mix,
         &mp4_path,
+        MuxOptions::default(),
+        progress.map(|_| MuxProgress {
+            duration_secs: span_secs,
+            report: &mux_report,
+        }),
     )
     .context("ffmpeg mux")?;
 

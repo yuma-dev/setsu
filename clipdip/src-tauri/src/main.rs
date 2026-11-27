@@ -187,6 +187,9 @@ struct AppState {
     /// true once the overlay reports in via `overlay_get_pending`; the boot
     /// watchdog force-closes an overlay that never sets this.
     overlay_booted: Arc<std::sync::atomic::AtomicBool>,
+    /// saves between the hotkey and clip-saved/clip-error; a long mux (40 s for 1 GB on a slow
+    /// drive) outlasts the overlay's timeout, which asks here before it calls the save dead
+    saves_in_flight: Arc<std::sync::atomic::AtomicUsize>,
     /// background Discord RPC connection, keeps the voice-call roster warm for
     /// hotkey-time snapshot; reports `Disabled` with no compiled-in secret.
     discord: Arc<clipdip_discord::DiscordHandle>,
@@ -757,6 +760,35 @@ fn overlay_get_pending(state: State<'_, AppState>) -> PendingState {
         update: state.pending_update.lock().unwrap().clone(),
         hint: state.pending_hint.lock().unwrap().clone(),
         recording: *state.recording_active.lock().unwrap(),
+    }
+}
+
+#[tauri::command]
+fn overlay_save_in_flight(state: State<'_, AppState>) -> bool {
+    state
+        .saves_in_flight
+        .load(std::sync::atomic::Ordering::SeqCst)
+        > 0
+}
+
+/// drops the in-flight count however the save ends, panic included
+struct SaveInFlight(Option<Arc<std::sync::atomic::AtomicUsize>>);
+
+impl SaveInFlight {
+    fn start(app: &AppHandle) -> Self {
+        let counter = app.try_state::<AppState>().map(|s| s.saves_in_flight.clone());
+        if let Some(c) = &counter {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        SaveInFlight(counter)
+    }
+}
+
+impl Drop for SaveInFlight {
+    fn drop(&mut self) {
+        if let Some(c) = &self.0 {
+            c.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 }
 
@@ -2595,6 +2627,7 @@ fn run_capture_loop(
                 let rename_hint = format!("Press {} to rename", cur.hotkey.rename_clip);
                 let corner = corner_slug(&cur.notifications.corner);
 
+                let _in_flight = SaveInFlight::start(&app);
                 // mux and metadata run in parallel via thread::scope (lets them borrow
                 // `pipeline` without 'static)
                 std::thread::scope(|s| {
@@ -2602,7 +2635,19 @@ fn run_capture_loop(
                     // everything below (overlay, metadata) runs alongside the mux
                     let save_dir = cur.output.directory.clone();
                     let stem_template = cur.output.filename_stem.clone();
+                    let progress_app = app.clone();
                     let save_thread = s.spawn(move || {
+                        // the overlay turns these into a stage label and a comet lap around the card
+                        let emit_progress = move |stage: clipdip_core::SaveStage, frac: f32| {
+                            if let Some(overlay) = progress_app.get_webview_window("overlay") {
+                                let _ = overlay.emit(
+                                    "clip-progress",
+                                    serde_json::json!({ "stage": stage.as_str(), "progress": frac }),
+                                );
+                            }
+                        };
+                        let progress: Option<&clipdip_core::SaveProgressFn> =
+                            if notifs_enabled { Some(&emit_progress) } else { None };
                         let t_start = t0.elapsed().as_millis();
                         // window title costs up to ~400ms against a hung window, only
                         // fetched when the filename template actually uses [title]
@@ -2622,10 +2667,12 @@ fn run_capture_loop(
                             SaveKind::Clip => pipeline.save_clip_in(
                                 Some(&save_dir),
                                 &vars,
+                                progress,
                             ),
                             SaveKind::Recording => pipeline.stop_recording_and_save_in(
                                 Some(&save_dir),
                                 &vars,
+                                progress,
                             ),
                         };
                         if prof {
@@ -3847,6 +3894,7 @@ fn main() {
             recording_active: Arc::new(Mutex::new(false)),
             loop_tx: loop_tx.clone(),
             overlay_booted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            saves_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             discord: discord.clone(),
             diagnostics: diagnostics.clone(),
             pipeline_error: Arc::new(Mutex::new(None)),
@@ -3993,6 +4041,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            overlay_save_in_flight,
             get_config,
             update_config,
             rename_clip,

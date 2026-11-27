@@ -1,4 +1,4 @@
-//! Clip muxing. Two paths: `mux_with_ffmpeg_cli` (used today, shells out to
+//! Clip muxing. Two paths: `mux_with_progress` (used today, shells out to
 //! ffmpeg to combine raw h264 + WAV sidecars into an MP4 with N audio streams)
 //! and `ClipWriter` (future libavformat fragmented MP4, stubbed, see HANDOFF.md).
 //!
@@ -9,7 +9,8 @@ use clipdip_ringbuf::EncodedPacket;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::{BufRead, BufReader, Read};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 use tracing::{debug, info, warn};
@@ -196,6 +197,39 @@ pub fn mux_with_options(
     output_mp4: &Path,
     opts: MuxOptions,
 ) -> Result<()> {
+    mux_with_progress(
+        ffmpeg,
+        video_h264,
+        video_bitstream,
+        video_fps,
+        audio_tracks,
+        include_mix,
+        output_mp4,
+        opts,
+        None,
+    )
+}
+
+/// how far a mux is, 0..1 over every ffmpeg run it takes; `duration_secs` is the clip length,
+/// which ffmpeg's `-progress` out_time is measured against
+pub struct MuxProgress<'a> {
+    pub duration_secs: f64,
+    pub report: &'a (dyn Fn(f32) + Sync),
+}
+
+/// [`mux_with_options`] that reports progress while ffmpeg runs
+#[allow(clippy::too_many_arguments)]
+pub fn mux_with_progress(
+    ffmpeg: &Path,
+    video_h264: &Path,
+    video_bitstream: VideoBitstream,
+    video_fps: f64,
+    audio_tracks: &[AudioTrack],
+    include_mix: bool,
+    output_mp4: &Path,
+    opts: MuxOptions,
+    progress: Option<MuxProgress<'_>>,
+) -> Result<()> {
     if !video_h264.exists() {
         // should be unreachable (caller just wrote it); AV quarantine or a cleanup race if it fires
         clipdip_diagnostics::report_error(
@@ -229,6 +263,8 @@ pub fn mux_with_options(
         tracks: audio_tracks,
         do_mix,
         output: &staging,
+        progress,
+        progress_bits: AtomicU32::new(0),
     };
 
     let encoder = if audio_tracks.is_empty() {
@@ -281,7 +317,15 @@ struct MuxJob<'a> {
     tracks: &'a [AudioTrack],
     do_mix: bool,
     output: &'a Path,
+    progress: Option<MuxProgress<'a>>,
+    /// highest fraction reported so far, f32 bits; keeps the bar from going backwards when
+    /// parallel tracks report out of step or an aac_mf fallback reruns a step
+    progress_bits: AtomicU32,
 }
+
+// share of the whole mux each ffmpeg run covers on the parallel path. the audio encodes are
+// short, the copy remux writes the whole video again and is most of the time on a slow drive
+const PARALLEL_AUDIO_SHARE: f32 = 0.35;
 
 impl MuxJob<'_> {
     fn base_cmd(&self) -> Command {
@@ -292,7 +336,32 @@ impl MuxJob<'_> {
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
         cmd.arg("-y").arg("-hide_banner").arg("-loglevel").arg("warning");
+        if self.progress.is_some() {
+            // key=value blocks on stdout, read in run(); -nostats drops the stderr status line
+            cmd.arg("-progress").arg("pipe:1").arg("-nostats");
+        }
         cmd
+    }
+
+    /// `what` is the run's stage name, `frac` how far that one run is
+    fn report_progress(&self, what: &str, frac: f32) {
+        let Some(p) = &self.progress else { return };
+        let frac = frac.clamp(0.0, 1.0);
+        let overall = match what {
+            "track" | "mix" => frac * PARALLEL_AUDIO_SHARE,
+            "remux" => PARALLEL_AUDIO_SHARE + frac * (1.0 - PARALLEL_AUDIO_SHARE),
+            _ => frac,
+        };
+        let prev = f32::from_bits(self.progress_bits.load(Ordering::Relaxed));
+        // only whole-percent steps go out, the overlay needs nothing finer
+        if overall < prev + 0.01 && overall < 1.0 {
+            return;
+        }
+        if overall <= prev {
+            return;
+        }
+        self.progress_bits.store(overall.to_bits(), Ordering::Relaxed);
+        (p.report)(overall);
     }
 
     fn video_input(&self, cmd: &mut Command) {
@@ -580,9 +649,11 @@ impl MuxJob<'_> {
 
         // capture stderr: CREATE_NO_WINDOW builds have nowhere to inherit it to, so a
         // failure used to leave only an exit code. forwarded to tracing below.
-        cmd.stdout(Stdio::null()).stderr(Stdio::piped());
+        let with_progress = self.progress.is_some();
+        cmd.stdout(if with_progress { Stdio::piped() } else { Stdio::null() })
+            .stderr(Stdio::piped());
 
-        let output = cmd.output().inspect_err(|e| {
+        let output = self.run_child(cmd, what).inspect_err(|e| {
             // NotFound = ffmpeg missing (broken bundle, ClipLib path bridge failed);
             // PermissionDenied = usually AV quarantine. both ship-blocking.
             if let clipdip_diagnostics::Gate::Send { .. } =
@@ -639,6 +710,42 @@ impl MuxJob<'_> {
             }
         }
         Err(anyhow!("ffmpeg {what} exited with status {code}"))
+    }
+
+    /// `cmd.output()`, plus reading ffmpeg's `-progress` stream when one was asked for.
+    /// stderr drains on its own thread so a chatty ffmpeg can't block on a full pipe
+    fn run_child(&self, cmd: &mut Command, what: &str) -> std::io::Result<std::process::Output> {
+        let Some(p) = &self.progress else {
+            return cmd.output();
+        };
+        let duration_us = (p.duration_secs.max(0.001) * 1e6) as f64;
+        let mut child = cmd.spawn()?;
+        let mut stderr_pipe = child.stderr.take();
+        let stdout = child.stdout.take();
+        let stderr = std::thread::scope(|s| {
+            let err_reader = s.spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(e) = stderr_pipe.as_mut() {
+                    let _ = e.read_to_end(&mut buf);
+                }
+                buf
+            });
+            if let Some(out) = stdout {
+                for line in BufReader::new(out).lines().map_while(|l| l.ok()) {
+                    // out_time_us is the position written so far; N/A before the first packet
+                    if let Some(v) = line.strip_prefix("out_time_us=") {
+                        if let Ok(us) = v.trim().parse::<f64>() {
+                            self.report_progress(what, (us / duration_us) as f32);
+                        }
+                    } else if line == "progress=end" {
+                        self.report_progress(what, 1.0);
+                    }
+                }
+            }
+            err_reader.join().unwrap_or_default()
+        });
+        let status = child.wait()?;
+        Ok(std::process::Output { status, stdout: Vec::new(), stderr })
     }
 }
 

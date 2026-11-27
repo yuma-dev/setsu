@@ -11,4 +11,4 @@ pub mod diskinfo;
 pub mod filename;
 pub mod pipeline;
 
-pub use pipeline::{AudioMeta, Pipeline};
+pub use pipeline::{AudioMeta, Pipeline, SaveProgressFn, SaveStage};
