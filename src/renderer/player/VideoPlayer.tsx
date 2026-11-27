@@ -319,6 +319,7 @@ function VideoPlayer({ clipLocation, clips, renameClip, removeClips, markClipsWa
 
     const elements = {
       videoPlayer: byId("video-player"),
+      frameCanvas: byId("frame-canvas"),
       clipTitle: byId("clip-title"),
       progressBarContainer: byId("progress-bar-container"),
       progressBar: byId("progress-bar"),
@@ -681,35 +682,72 @@ function VideoPlayer({ clipLocation, clips, renameClip, removeClips, markClipsWa
       // updatePreview only reads e.clientX; the legacy module is loosely typed
       window.legacyPlayer?.updatePreview?.({ clientX }, { skipPosition: true });
     };
-    const onMove = (e: MouseEvent) => {
+    const showAt = (clientX: number) => {
       preview.style.display = "block";
       if (!half) half = preview.offsetWidth / 2 || 100;
       const rect = container.getBoundingClientRect();
-      const x = e.clientX - rect.left;
+      const x = clientX - rect.left;
       preview.style.left = "0px";
       preview.style.transform = `translate3d(${x - half}px, 0, 0)`;
 
       const now = performance.now();
       window.clearTimeout(trailing);
-      const clientX = e.clientX;
       trailing = window.setTimeout(() => seekAt(clientX), 90);
-      if (now - lastSeek >= 60) {
+      // the throttle is for <video> seeks; the frame engine answers from memory or one gop decode
+      if (now - lastSeek >= (window.legacyPlayer?.frameEngineReady?.() ? 0 : 60)) {
         lastSeek = now;
         seekAt(clientX);
       }
     };
-    const onLeave = () => {
+    // a trim handle dragged during playback: the preview sits on the handle, which the 0.5 s
+    // min gap can hold back from the cursor, and stays up when the cursor leaves the bar
+    let trimDragging = false;
+    // a press that drags the playhead, or a trim handle while paused, moves the video itself: the
+    // preview would only repeat it. hovering, and trim drags while playing, still get it
+    let pressed = false;
+    const hidePreview = () => {
       preview.style.display = "none";
       window.clearTimeout(trailing);
     };
+    const onMove = (e: MouseEvent) => {
+      if (!trimDragging && !pressed) showAt(e.clientX);
+    };
+    const onLeave = () => {
+      if (!trimDragging) hidePreview();
+    };
+    const onDown = (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      pressed = true;
+      hidePreview();
+    };
+    const onUp = () => {
+      pressed = false;
+    };
+    const onTrimDrag = (e: Event) => {
+      const time = (e as CustomEvent<{ time: number | null }>).detail?.time;
+      if (time == null || !video.duration) {
+        trimDragging = false;
+        hidePreview();
+        return;
+      }
+      trimDragging = true;
+      const rect = container.getBoundingClientRect();
+      showAt(rect.left + (time / video.duration) * rect.width);
+    };
     container.addEventListener("mousemove", onMove);
     container.addEventListener("mouseleave", onLeave);
+    container.addEventListener("mousedown", onDown);
+    window.addEventListener("mouseup", onUp);
+    container.addEventListener("trim-drag-preview", onTrimDrag);
 
     return () => {
       temp.removeEventListener("seeked", onSeeked);
       video.removeEventListener("loadedmetadata", onLoaded);
       container.removeEventListener("mousemove", onMove);
       container.removeEventListener("mouseleave", onLeave);
+      container.removeEventListener("mousedown", onDown);
+      window.removeEventListener("mouseup", onUp);
+      container.removeEventListener("trim-drag-preview", onTrimDrag);
       window.clearTimeout(trailing);
     };
   }, []);
@@ -788,6 +826,8 @@ function VideoPlayer({ clipLocation, clips, renameClip, removeClips, markClipsWa
             />
             {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
             <video id="video-player" />
+            {/* paused frames from player-legacy/frame-engine.js, over the video while it seeks */}
+            <canvas id="frame-canvas" aria-hidden="true" />
             <div id="loading-overlay">
               <div className="loading-spinner" />
             </div>

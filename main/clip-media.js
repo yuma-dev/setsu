@@ -107,6 +107,32 @@ async function extractPcm(file, start, dur, audioCount, { background = false } =
   return copy;
 }
 
+// trim scrubbing pcm: enough for voices and game sfx at up to 4x, ~2.9 MB of s16 a minute
+const SCRUB_RATE = 24000;
+
+/**
+ * the clip's audible mix for trim scrubbing as mono s16le: the given streams at their mixer
+ * volumes, or the first audio stream when mix is null. null when nothing is audible
+ * @param {{ streamIndex: number, volume: number }[] | null} mix
+ */
+async function extractScrubPcm(file, mix) {
+  const args = ['-hide_banner', '-loglevel', 'error', '-i', file, '-vn'];
+  if (Array.isArray(mix)) {
+    const tracks = mix.filter((t) => Number.isInteger(t && t.streamIndex) && t.streamIndex >= 0);
+    if (tracks.length === 0) return null;
+    const parts = tracks.map((t, i) => `[0:${t.streamIndex}]volume=${Math.max(0, Number(t.volume) || 0).toFixed(4)}[s${i}]`);
+    const inputs = tracks.map((_, i) => `[s${i}]`).join('');
+    const mixed = tracks.length > 1 ? `${inputs}amix=inputs=${tracks.length}:normalize=0:duration=longest,` : `${inputs}`;
+    args.push('-filter_complex', `${parts.join(';')};${mixed}aformat=channel_layouts=mono,aresample=${SCRUB_RATE}[o]`, '-map', '[o]');
+  } else {
+    args.push('-map', '0:a:0', '-ac', '1', '-ar', String(SCRUB_RATE));
+  }
+  args.push('-f', 's16le', '-');
+  // 64 MB is about 23 minutes; a longer recording fails here and just doesn't scrub
+  const pcm = await run(ffmpegPath, args, { buffer: true, maxBuffer: 64 * 1024 * 1024 });
+  return { rate: SCRUB_RATE, pcm };
+}
+
 /* runs inside a worker (stringified), so it may only use its own arguments. normalized cross
  * correlation of y against x at every lag k (y[n] lines up with x[n + k]) that overlaps by at least
  * minOverlap samples, negative k included, via one packed complex fft */
@@ -449,6 +475,7 @@ async function streamCopyCut(file, kf, end, output) {
 }
 
 module.exports = {
+  extractScrubPcm,
   probeMedia,
   extractPcm,
   xcorr,

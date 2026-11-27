@@ -94,18 +94,29 @@ export default function Timeline({ waveform, tracks, open, gain, focus, layers, 
     const video = document.getElementById("video-player") as HTMLVideoElement | null;
     const el = ref.current;
     if (!state || !video || !el || state.isDragging) return;
-    const seek = (clientX: number) => {
+    // the drag rides the same spring and scrub audio as the trim handles (legacy playheadDrag),
+    // pausing into it when playing. decided once the press moves, so a click keeps playing
+    const startX = e.clientX;
+    let sprung: boolean | null = null;
+    const seek = (clientX: number, clientY: number) => {
       const r = el.getBoundingClientRect();
       const pct = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
       const time = pct * video.duration;
+      if (sprung === null) {
+        if (Math.abs(clientX - startX) < 3) return;
+        sprung = window.legacyPlayer?.playheadDrag?.begin?.() ?? false;
+      }
+      if (sprung && window.legacyPlayer?.playheadDrag?.move?.(time, clientX, clientY)) return;
       state.wasLastSeekManual = true;
       state.isAutoResetDisabled = time < state.trimStartTime || time > state.trimEndTime;
-      video.currentTime = time;
+      // paused, the frame engine paints it at once and seeks the video itself
+      if (!window.legacyPlayer?.scrubTo?.(time)) video.currentTime = time;
     };
-    const move = (ev: MouseEvent) => seek(ev.clientX);
+    const move = (ev: MouseEvent) => seek(ev.clientX, ev.clientY);
     const up = () => {
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
+      if (sprung) window.legacyPlayer?.playheadDrag?.end?.();
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);

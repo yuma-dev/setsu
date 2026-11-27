@@ -8,6 +8,8 @@ const path = require('path');
 const logger = require('./logger');
 const state = require('./state');
 const { AudioTracksManager, SingleTrackMixer } = require('./audio-tracks-manager');
+const audioScrub = require('./audio-scrub');
+const frameEngine = require('./frame-engine');
 
 // active multi-track manager, if any
 let activeAudioTracksManager = null;
@@ -767,7 +769,10 @@ function updatePlayhead() {
     state.isAutoResetDisabled = false;
   }
 
-  if (!state.isAutoResetDisabled && isOutsideBounds) {
+  // a trim dragged past the playhead mid-playback only applies on release, the view stays put. paused,
+  // a handle sitting on a frame edge read as just outside the trim and looped mid-drag
+  const holdForTrimDrag = state.isDraggingTrim || dragSpring;
+  if (!state.isAutoResetDisabled && isOutsideBounds && !holdForTrimDrag) {
     elements.videoPlayer.currentTime = state.trimStartTime;
   }
 
@@ -793,50 +798,229 @@ function updatePlayhead() {
   requestAnimationFrame(updatePlayhead);
 }
 
-function handleTrimDrag(e) {
-  const dragDistance = Math.abs(e.clientX - state.dragStartX);
+// a dragged trim handle, or the playhead dragged while paused, chases the mouse on a critically
+// damped spring: hand wobble and uneven mousemove spacing come out as one smooth motion and the
+// drag has some weight to it. the video, the frame preview and the scrub audio all follow the
+// sprung value, not the raw mouse
+// 130 ms: replaying a recorded session, 70 ms left the speed wobbling 8% frame to frame (heard as
+// pitch flutter); 130 halves that for ~70 ms more lag, which reads as weight
+const DRAG_SMOOTH_S = 0.13;
+// window.__scrubTune ({ smooth }) overrides it and window.__scrubTrace (an array) records the
+// drag, both set from devtools while tuning; neither exists otherwise
+const smoothTime = () => (window.__scrubTune && window.__scrubTune.smooth) || DRAG_SMOOTH_S;
+function trace(...entry) {
+  const t = window.__scrubTrace;
+  if (t && t.length < 500000) t.push([performance.now(), ...entry]);
+}
+// own flag: the page-wide mouseup listener from init runs before endTrimDrag and has already
+// cleared state.isDraggingTrim by then, which made every drag look like a click on release
+let trimDragMoved = false;
+let dragSpring = null;
 
-  if (dragDistance > state.dragThreshold) {
-    state.isDraggingTrim = true;
+// fine scrubbing: the further the mouse goes above or below the timeline during a drag, the less
+// clip a pixel moves. one pixel is ~0.1 s of a minute-long clip, too coarse to land on a frame.
+// past 40 px every pixel takes 1% off the speed, down to 10% (~0.6 frames per px at 60 fps on a
+// minute-long clip). once slowed the drag moves by mouse deltas from where it is, so nothing jumps
+// and coming back to the bar keeps that offset
+const FINE_FREE_PX = 40;
+const FINE_MIN = 0.1;
+let fine = null;
+let rateLabel = null;
+
+/**
+ * where a drag points, given the mouse and the time straight under it on the bar
+ * @param {number} current the drag's target so far (already clamped), deltas apply to it
+ */
+function fineTarget(clientX, clientY, under, current) {
+  const rect = elements.progressBarContainer.getBoundingClientRect();
+  const away = Math.max(0, rect.top - clientY, clientY - rect.bottom);
+  const pct = Math.max(FINE_MIN * 100, 100 - Math.max(0, Math.round(away - FINE_FREE_PX)));
+  const lastX = fine ? fine.lastX : clientX;
+  const slowed = (fine && fine.slowed) || pct < 100;
+  fine = { lastX: clientX, slowed };
+  setRateLabel(pct < 100 ? `${pct}%` : '');
+  if (!slowed) return under;
+  const duration = elements.videoPlayer.duration;
+  const t = current + ((clientX - lastX) / rect.width) * duration * (pct / 100);
+  return Math.max(0, Math.min(duration, t));
+}
+
+function setRateLabel(text) {
+  if (!rateLabel) {
+    rateLabel = document.createElement('div');
+    rateLabel.className = 'scrub-rate';
+    elements.progressBarContainer.appendChild(rateLabel);
   }
+  if (text) rateLabel.textContent = text;
+  rateLabel.classList.toggle('on', !!text);
+}
 
-  if (state.isDraggingTrim) {
-    const rect = elements.progressBarContainer.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const width = rect.width;
-    const dragPercent = Math.max(0, Math.min(1, x / width));
-    const dragTime = dragPercent * elements.videoPlayer.duration;
+/** critically damped step toward target (the game-engine SmoothDamp), no overshoot */
+function smoothDamp(cur, target, vel, smoothTime, dt) {
+  const omega = 2 / smoothTime;
+  const x = omega * dt;
+  const exp = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+  const change = cur - target;
+  const temp = (vel + omega * change) * dt;
+  let nextVel = (vel - omega * temp) * exp;
+  let next = target + (change + temp) * exp;
+  if ((target - cur > 0) === (next > target)) {
+    next = target;
+    nextVel = 0;
+  }
+  return [next, nextVel];
+}
 
-    const minGap = 0.5;
-
-    if (state.isDragging === "start") {
-      const maxStartTime = Math.max(0, state.trimEndTime - minGap);
-      state.trimStartTime = Math.max(0, Math.min(dragTime, maxStartTime));
-    } else if (state.isDragging === "end") {
-      const minEndTime = Math.min(elements.videoPlayer.duration, state.trimStartTime + minGap);
-      state.trimEndTime = Math.max(minEndTime, Math.min(elements.videoPlayer.duration, dragTime));
-    }
-
-    updateTrimControls();
-
+/** speed: the spring's, in media seconds per second; the frame engine picks frame sizes by it */
+function applyDragValue(which, value, speed = 0) {
+  if (which === "playhead") {
     state.wasLastSeekManual = true;
-    const newTime = state.isDragging === "start" ? state.trimStartTime : state.trimEndTime;
+    state.isAutoResetDisabled = value < state.trimStartTime || value > state.trimEndTime;
+    if (!frameEngine.show(value, { speed })) elements.videoPlayer.currentTime = value;
+    audioScrub.move(value);
+    return;
+  }
+  if (which === "start") state.trimStartTime = value;
+  else state.trimEndTime = value;
+  updateTrimControls();
+  if (elements.videoPlayer.paused) {
+    state.wasLastSeekManual = true;
     state.isAutoResetDisabled = false;
-    elements.videoPlayer.currentTime = newTime;
-
-    saveTrimChanges();
-    if (callbacks.markEditing) callbacks.markEditing('trim');
+    if (!frameEngine.show(value, { speed })) elements.videoPlayer.currentTime = value;
+    audioScrub.move(value);
+  } else {
+    // playing: keep watching, the hover preview (VideoPlayer.tsx) shows the frame under the handle
+    elements.progressBarContainer.dispatchEvent(new CustomEvent('trim-drag-preview', { detail: { time: value } }));
   }
 }
 
-function endTrimDrag(e) {
-  if (!state.isDraggingTrim) {
-    const clickPercent = (state.dragStartX - elements.progressBarContainer.getBoundingClientRect().left) / elements.progressBarContainer.offsetWidth;
-    elements.videoPlayer.currentTime = clickPercent * elements.videoPlayer.duration;
+function springStep(now) {
+  const s = dragSpring;
+  if (!s) return;
+  s.raf = 0;
+  const dt = Math.min(0.05, Math.max(0.001, (now - s.last) / 1000));
+  s.last = now;
+  [s.value, s.vel] = smoothDamp(s.value, s.target, s.vel, smoothTime(), dt);
+  const settled = Math.abs(s.target - s.value) < 1e-4 && Math.abs(s.vel) < 1e-3;
+  if (settled) s.value = s.target;
+  trace('spring', s.which, s.target, s.value, s.vel, dt);
+  if (rateLabel && elements.videoPlayer.duration) rateLabel.style.left = `${(s.value / elements.videoPlayer.duration) * 100}%`;
+  applyDragValue(s.which, s.value, s.vel);
+  if (!settled) s.raf = requestAnimationFrame(springStep);
+  else if (s.released) finishDrag();
+}
+
+/** the drag came to rest after release (or a new grab cut the glide short) */
+function finishDrag({ snap = false } = {}) {
+  const s = dragSpring;
+  if (!s) return;
+  dragSpring = null;
+  if (s.raf) cancelAnimationFrame(s.raf);
+  if (snap) applyDragValue(s.which, s.target);
+  trace('end', s.which);
+  fine = null;
+  setRateLabel('');
+  audioScrub.stop();
+  if (s.which === "playhead") {
+    if (s.resume) elements.videoPlayer.play().catch(() => {});
+    return;
   }
+  elements.progressBarContainer.dispatchEvent(new CustomEvent('trim-drag-preview', { detail: { time: null } }));
+  // playing and now before the new start: play on into the range rather than jump to it. past the
+  // new end it loops to the start, same as reaching the end
+  if (!elements.videoPlayer.paused && elements.videoPlayer.currentTime < state.trimStartTime) {
+    state.isAutoResetDisabled = true;
+  }
+  saveTrimChanges();
+}
+
+function handleTrimDrag(e) {
+  if (Math.abs(e.clientX - state.dragStartX) > state.dragThreshold) {
+    state.isDraggingTrim = true;
+    trimDragMoved = true;
+  }
+  if (!trimDragMoved || !state.isDragging) return;
+
+  const rect = elements.progressBarContainer.getBoundingClientRect();
+  const dragPercent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  const which = state.isDragging;
+  const held = dragSpring ? dragSpring.target : which === "start" ? state.trimStartTime : state.trimEndTime;
+  const dragTime = fineTarget(e.clientX, e.clientY, dragPercent * elements.videoPlayer.duration, held);
+  const minGap = 0.5;
+  const target = which === "start"
+    ? Math.max(0, Math.min(dragTime, Math.max(0, state.trimEndTime - minGap)))
+    : Math.max(Math.min(elements.videoPlayer.duration, state.trimStartTime + minGap), Math.min(elements.videoPlayer.duration, dragTime));
+
+  if (!dragSpring) {
+    dragSpring = { which, value: which === "start" ? state.trimStartTime : state.trimEndTime, vel: 0, target, last: 0, raf: 0, released: false };
+    trace('begin', which, dragSpring.value);
+    fine = null;
+  }
+  aimSpring(target);
+  if (callbacks.markEditing) callbacks.markEditing('trim');
+}
+
+function aimSpring(target) {
+  dragSpring.target = target;
+  trace('mouse', dragSpring.which, target);
+  if (!dragSpring.raf) {
+    dragSpring.last = performance.now();
+    dragSpring.raf = requestAnimationFrame(springStep);
+  }
+}
+
+// the timeline drag (Timeline.tsx): same spring and scrub audio as the trim handles. a drag that
+// starts during playback pauses into the scrub and plays on from wherever it is let go
+const playheadDrag = {
+  /** once the press has moved; false when this drag isn't ours and the video should be seeked */
+  begin() {
+    const video = elements.videoPlayer;
+    if (!video.duration) return false;
+    const resume = !video.paused;
+    // playing without the frame engine: a paused scrub would only be the slow <video> seeks
+    if (resume && !frameEngine.ready()) return false;
+    if (resume) video.pause();
+    if (dragSpring) finishDrag({ snap: true });
+    dragSpring = { which: "playhead", value: video.currentTime, vel: 0, target: video.currentTime, last: 0, raf: 0, released: false, resume };
+    fine = null;
+    audioScrub.start({ setupAudioContext, manager: activeAudioTracksManager, around: video.currentTime });
+    trace('begin', 'playhead', video.currentTime);
+    return true;
+  },
+  /** time: straight under the mouse on the bar; the mouse position adds fine scrubbing */
+  move(time, clientX, clientY) {
+    if (!dragSpring || dragSpring.which !== "playhead" || dragSpring.released) return false;
+    const t = Number.isFinite(clientX) ? fineTarget(clientX, clientY, time, dragSpring.target) : time;
+    aimSpring(Math.max(0, Math.min(t, elements.videoPlayer.duration)));
+    return true;
+  },
+  end() {
+    if (!dragSpring || dragSpring.which !== "playhead") return;
+    dragSpring.released = true;
+    // the glide ends where the mouse let go: start the <video> seek now, it plays from there
+    if (dragSpring.resume) frameEngine.preseek(dragSpring.target);
+    if (!dragSpring.raf) finishDrag();
+  },
+};
+
+function endTrimDrag(e) {
+  if (!trimDragMoved) {
+    const clickPercent = (state.dragStartX - elements.progressBarContainer.getBoundingClientRect().left) / elements.progressBarContainer.offsetWidth;
+    const t = clickPercent * elements.videoPlayer.duration;
+    if (!frameEngine.show(t, { exact: true })) elements.videoPlayer.currentTime = t;
+  }
+  trimDragMoved = false;
 
   state.isDragging = null;
   state.isDraggingTrim = false;
+  if (dragSpring) {
+    dragSpring.released = true;
+    // already at rest: finish now, else springStep finishes when the glide ends
+    if (!dragSpring.raf) finishDrag();
+  } else {
+    audioScrub.stop();
+    elements.progressBarContainer.dispatchEvent(new CustomEvent('trim-drag-preview', { detail: { time: null } }));
+  }
   document.body.classList.remove('dragging');
   document.removeEventListener("mousemove", handleTrimDrag);
   document.removeEventListener("mouseup", endTrimDrag);
@@ -859,6 +1043,9 @@ function checkDragState() {
       state.lastMousePosition.y > rect.bottom
     ) {
       logger.info("Drag state reset due to mouse being outside the progress bar and mouse button not pressed");
+      trimDragMoved = false;
+      if (dragSpring) finishDrag({ snap: true });
+      audioScrub.stop();
       state.isDragging = null;
       state.isDraggingTrim = false;
       updateTrimControls();
@@ -943,14 +1130,43 @@ function isVideoInFullscreen(videoElement) {
   );
 }
 
+// a press is one frame; held past this, it steps on its own. a tap is ~100 ms, which used to be
+// 3-4 steps at the held rate
+const FRAME_HOLD_MS = 300;
+
 function moveFrame(direction) {
+  // the key's own auto-repeat while held: the loop below already steps
+  if (state.isFrameStepping && state.frameStepDirection === direction) return;
+  // stepping is for looking at single frames; paused, the frame engine can serve every step
+  if (!elements.videoPlayer.paused) elements.videoPlayer.pause();
   state.isFrameStepping = true;
   state.frameStepDirection = direction;
+  const now = performance.now();
+  // the press's own step waits in the loop when the <video> is still busy with a seek
+  state.frameStepFirstDue = !stepOnce(direction, now);
+  state.frameStepHoldUntil = now + FRAME_HOLD_MS;
 
   if (!state.pendingFrameStep) {
     state.pendingFrameStep = true;
     requestAnimationFrame(frameStep);
   }
+}
+
+/** false when the <video> is still on the last seek and the step has to wait */
+function stepOnce(direction, now) {
+  if (frameEngine.ready() && elements.videoPlayer.paused) {
+    frameEngine.step(direction);
+  } else if (!elements.videoPlayer.seeking) {
+    // one seek at a time: stacked ones each re-decoded from the keyframe and stalled the key
+    // probe fps from get-clip-info; 60 when unknown (clips cached before it was stored)
+    const frameTime = 1 / (state.currentClip?.fps || 60);
+    const newTime = elements.videoPlayer.currentTime + (direction * frameTime);
+    elements.videoPlayer.currentTime = Math.max(0, Math.min(newTime, elements.videoPlayer.duration));
+  } else {
+    return false;
+  }
+  state.lastFrameStepTime = now;
+  return true;
 }
 
 function frameStep(timestamp) {
@@ -959,14 +1175,17 @@ function frameStep(timestamp) {
     return;
   }
 
-  // probe fps from get-clip-info; 60 when unknown (clips cached before it was stored)
-  const frameTime = 1 / (state.currentClip?.fps || 60);
-  const minFrameInterval = 50; // min ms between steps
+  // the engine has the frames decoded ahead, so a held key can step at ~30 a second
+  const engine = frameEngine.ready() && elements.videoPlayer.paused;
+  const minFrameInterval = engine ? 33 : 50;
 
-  if (timestamp - state.lastFrameStepTime >= minFrameInterval) {
-    const newTime = elements.videoPlayer.currentTime + (state.frameStepDirection * frameTime);
-    elements.videoPlayer.currentTime = Math.max(0, Math.min(newTime, elements.videoPlayer.duration));
-    state.lastFrameStepTime = timestamp;
+  if (state.frameStepFirstDue) {
+    if (stepOnce(state.frameStepDirection, timestamp)) {
+      state.frameStepFirstDue = false;
+      state.frameStepHoldUntil = timestamp + FRAME_HOLD_MS;
+    }
+  } else if (timestamp >= state.frameStepHoldUntil && timestamp - state.lastFrameStepTime >= minFrameInterval) {
+    stepOnce(state.frameStepDirection, timestamp);
   }
 
   if (state.isFrameStepping) {
@@ -977,12 +1196,8 @@ function frameStep(timestamp) {
 }
 
 function updateVideoDisplay() {
-  if (elements.videoPlayer.paused) {
-    const canvas = document.createElement('canvas');
-    canvas.width = elements.videoPlayer.videoWidth;
-    canvas.height = elements.videoPlayer.videoHeight;
-    canvas.getContext('2d').drawImage(elements.videoPlayer, 0, 0, canvas.width, canvas.height);
-
+  // the engine's canvas covers the video while it steps
+  if (elements.videoPlayer.paused && !frameEngine.ready()) {
     // force a repaint
     elements.videoPlayer.style.display = 'none';
     // eslint-disable-next-line no-unused-expressions
@@ -1073,9 +1288,20 @@ function updatePreview(e, options = {}) {
   const previewTimestamp = document.getElementById('preview-timestamp');
   previewTimestamp.textContent = formatTime(time);
 
+  if (frameEngine.previewAt(time, drawPreview)) return;
   if (elements.tempVideo.readyState >= 2) {
     elements.tempVideo.currentTime = time;
   }
+}
+
+function drawPreview(bitmap) {
+  const canvas = document.getElementById('preview-canvas');
+  if (canvas) canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+}
+
+/** timeline drag while paused; false when the engine is off and the caller seeks the video */
+function scrubTo(time) {
+  return frameEngine.show(time);
 }
 
 function handleKeyRelease(e) {
@@ -1317,6 +1543,8 @@ async function closePlayer() {
   document.removeEventListener("keydown", handleKeyPress);
   document.removeEventListener("keyup", handleKeyRelease);
   setVolumeSource({ source: 'default' });
+  audioScrub.release();
+  frameEngine.closeClip();
 
   const originalName = state.currentClip ? state.currentClip.originalName : null;
   const oldCustomName = state.currentClip ? state.currentClip.customName : null;
@@ -2007,6 +2235,7 @@ async function openClip(originalName, customName) {
 
     logger.info(`[${originalName}] Setting video source: ${path.join(state.clipLocation, originalName)}`);
     elements.videoPlayer.src = `file://${path.join(state.clipLocation, originalName)}`;
+    frameEngine.openClip(path.join(state.clipLocation, originalName));
 
     if (elements.videoPlayer.readyState >= 2) {
        logger.info(`[${originalName}] Video ready state is ${elements.videoPlayer.readyState}, forcing events manually`);
@@ -2507,6 +2736,8 @@ function init(domElements, callbackOptions = {}) {
   clipGlowManager = new ClipGlowManager();
   clipGlowManager.init();
 
+  if (elements.videoPlayer && elements.frameCanvas) frameEngine.attach(elements.videoPlayer, elements.frameCanvas);
+
   setupEventListeners();
   setInterval(checkDragState, 100);
 
@@ -2603,6 +2834,16 @@ function setupEventListeners() {
   }
 
   if (elements.progressBarContainer) {
+    // near a trim handle while paused: load the scrub audio before the press, the drag may follow
+    elements.progressBarContainer.addEventListener("mousemove", (e) => {
+      const video = elements.videoPlayer;
+      if (!video.paused || !video.duration || state.isDragging) return;
+      const rect = elements.progressBarContainer.getBoundingClientRect();
+      const at = (e.clientX - rect.left) / rect.width;
+      const near = (t) => Math.abs(at - t / video.duration) < 0.04;
+      const handle = near(state.trimStartTime) ? state.trimStartTime : near(state.trimEndTime) ? state.trimEndTime : null;
+      if (handle !== null) audioScrub.load({ manager: activeAudioTracksManager, around: handle });
+    });
     elements.progressBarContainer.addEventListener("mousedown", (e) => {
       const rect = elements.progressBarContainer.getBoundingClientRect();
       const x = e.clientX - rect.left;
@@ -2619,6 +2860,12 @@ function setupEventListeners() {
 
       if (state.isDragging) {
         state.isDraggingTrim = false;
+        trimDragMoved = false;
+        if (dragSpring) finishDrag({ snap: true });
+        if (elements.videoPlayer.paused) {
+          const around = state.isDragging === "start" ? state.trimStartTime : state.trimEndTime;
+          audioScrub.start({ setupAudioContext, manager: activeAudioTracksManager, around });
+        }
         document.body.classList.add('dragging');
         document.addEventListener("mousemove", handleTrimDrag);
         document.addEventListener("mouseup", endTrimDrag);
@@ -2630,7 +2877,7 @@ function setupEventListeners() {
           state.isAutoResetDisabled = true;
         }
 
-        elements.videoPlayer.currentTime = newTime;
+        if (!frameEngine.show(newTime, { exact: true })) elements.videoPlayer.currentTime = newTime;
       }
     });
   }
@@ -2822,6 +3069,9 @@ module.exports = {
   handleKeyPress,
   handleKeyRelease,
   updatePreview,
+  scrubTo,
+  playheadDrag,
+  frameEngineReady: () => frameEngine.ready(),
 
   // Volume icons (for external use)
   volumeIcons,

@@ -211,6 +211,8 @@ const loudnessModule = require('./main/loudness');
 const analysisModule = require('./main/audio-analysis');
 // settings > storage and overlapping save detection; registers its own storage-* handlers
 const storageModule = require('./main/storage');
+// already loaded by storage, only the trim scrub reaches into it from here
+const clipMedia = require('./main/clip-media');
 // Library order (newest first) from the last get-clips, for the warmer.
 let lastClipNames = [];
 // watcher overflow rescans, see scheduleOverflowRescan
@@ -1762,6 +1764,17 @@ ipcMain.handle("get-clip-open-state", async (event, clipName) => {
 
 ipcMain.handle("get-clip-waveform", async (event, clipName) => {
   return analysisModule.get(clipName);
+});
+
+// trim scrub audio for files player-legacy/mp4-audio.js can't read (not mp4, or a codec webcodecs lacks)
+ipcMain.handle("get-scrub-audio", async (event, clipName, mix) => {
+  try {
+    const settings = await getSettings();
+    return await clipMedia.extractScrubPcm(path.join(settings.clipLocation, clipName), Array.isArray(mix) ? mix : null);
+  } catch (error) {
+    logger.warn(`get-scrub-audio failed for ${clipName}: ${String(error && error.message).slice(0, 200)}`);
+    return null;
+  }
 });
 
 ipcMain.handle("get-analysis-progress", async () => {
